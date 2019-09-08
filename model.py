@@ -11,10 +11,10 @@ import functools
 
 @functools.lru_cache(maxsize=32)
 def get_causal_mask(canvas_size, see_self=True):
-    mask = torch.zeros([canvas_size, canvas_size]).cuda()
+    mask = torch.zeros([canvas_size, canvas_size])
     for i in range(canvas_size):
         mask[i, :i + 1] = 1.
-    return mask
+    return mask.cuda()
 
 def get_pos_embeddings(side_len):
 
@@ -145,14 +145,17 @@ class AttentionBlock(nn.Module):
         attn = torch.bmm(q.transpose(-2, -1), k)
 
         #print(attn.shape)  
-
+        #print(attn[0], self.mask[0])
         #print(attn[0])
+        mask = self.mask.to(attn.device)
 
-        attn_masked = attn * self.mask + (1 - self.mask) * (-10000.)
+        #print(mask[0])
+
+        attn_masked = attn * mask + (1 - mask) * (-10000.)
 
         #print(attn_masked[0])
 
-        attn_masked = nn.functional.softmax(attn_masked, dim=-1) * self.mask
+        attn_masked = nn.functional.softmax(attn_masked, dim=-1) * mask
 
         #print(attn_masked[0])
         #input()
@@ -369,7 +372,7 @@ class PixelCNN(nn.Module):
         #self.out_l = nn.DataParallel(self.out_l)
         #self.final = nn.DataParallel(self.final)
 
-        #self.cuda()
+        self.cuda()
 
 
     def forward(self, x, z=None, training=False):

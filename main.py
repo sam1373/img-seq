@@ -10,7 +10,7 @@ from model import *
 
 import matplotlib.pyplot as plt
 
-from data import CelebaDataset
+#from data import CelebaDataset
 
 import numpy as np
 
@@ -22,7 +22,7 @@ batch_size = 128
 sep = 8
 
 #model = ImgAttendModel(side_len=16, kernels=3, channels=128, blocks_rep=4, conv_rep=4)
-model = PixelCNN(side_len=16, kernels=7, in_channels=3, channels=128, out_channels=200)
+model = PixelCNN(side_len=28, kernels=7, in_channels=3, channels=128, out_channels=200)
 model = nn.DataParallel(model)
 
 total = 0
@@ -51,9 +51,9 @@ if dataset == "CelebA":
 elif dataset == "MNIST":
 
   trainloader = torch.utils.data.DataLoader(
-    torchvision.datasets.MNIST('MNIST/', train=True, download=True,
+    torchvision.datasets.MNIST('/data/skriman2/MNIST/', train=True, download=True,
                                transform=torchvision.transforms.Compose([
-                                 transforms.Resize((16, 16)),
+                                 #transforms.Resize((16, 16)),
                                  transforms.ToTensor(),
                                  #rescaling
                                  #transforms
@@ -61,7 +61,7 @@ elif dataset == "MNIST":
                                  #transforms.Normalize(
                                  #  (0.5,), (0.5,))
                                ])),
-    batch_size=batch_size, shuffle=True)
+    batch_size=batch_size, shuffle=True, num_workers=0)
 
 
 examples = enumerate(trainloader)
