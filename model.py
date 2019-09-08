@@ -364,12 +364,12 @@ class PixelCNN(nn.Module):
 
         self.layers = nn.Sequential(*self.layers)
 
-        self.in_l = nn.DataParallel(self.in_l)
-        self.layers = nn.DataParallel(self.layers)
-        self.out_l = nn.DataParallel(self.out_l)
-        self.final = nn.DataParallel(self.final)
+        #self.in_l = nn.DataParallel(self.in_l)
+        #self.layers = nn.DataParallel(self.layers)
+        #self.out_l = nn.DataParallel(self.out_l)
+        #self.final = nn.DataParallel(self.final)
 
-        self.cuda()
+        #self.cuda()
 
 
     def forward(self, x, z=None, training=False):
@@ -402,7 +402,7 @@ class PixelCNN(nn.Module):
 
         #x = x.view(bs, x.shape[1], -1)
 
-        for l in self.layers.module:
+        for l in self.layers:
             x = l(x)
             if 1:#isinstance(l, CausalConv):
                 if i < self.total_convs // 2:

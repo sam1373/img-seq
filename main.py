@@ -23,6 +23,7 @@ sep = 8
 
 #model = ImgAttendModel(side_len=16, kernels=3, channels=128, blocks_rep=4, conv_rep=4)
 model = PixelCNN(side_len=16, kernels=7, in_channels=3, channels=128, out_channels=200)
+model = nn.DataParallel(model)
 
 total = 0
 for p in model.parameters():
