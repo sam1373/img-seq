@@ -24,6 +24,10 @@ def get_pos_embeddings(side_len):
 
     return torch.cat((x, y), dim=1).cuda()
 
+#class MyDataParallel(nn.DataParallel):
+#    def __getattr__(self, name):
+#        return getattr(self.module, name)
+
 
 #causal conv
 class CausalConv(nn.Conv2d):
@@ -360,7 +364,13 @@ class PixelCNN(nn.Module):
 
         self.layers = nn.Sequential(*self.layers)
 
+        self.in_l = nn.DataParallel(self.in_l)
+        self.layers = nn.DataParallel(self.layers)
+        self.out_l = nn.DataParallel(self.out_l)
+        self.final = nn.DataParallel(self.final)
+
         self.cuda()
+
 
     def forward(self, x, z=None, training=False):
 
@@ -392,7 +402,7 @@ class PixelCNN(nn.Module):
 
         #x = x.view(bs, x.shape[1], -1)
 
-        for l in self.layers:
+        for l in self.layers.module:
             x = l(x)
             if 1:#isinstance(l, CausalConv):
                 if i < self.total_convs // 2:
@@ -447,8 +457,6 @@ class PixelCNN(nn.Module):
 
         return x
     """
-
-
 
 
 if __name__ == '__main__':
