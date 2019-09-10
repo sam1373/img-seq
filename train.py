@@ -25,7 +25,7 @@ def KLD(mean, logvar):
 
 class Trainer(object):
 
-    def __init__(self, model, sample_path="sample", recon_path="recon", codes_path="codes", checkpoints='model.cp'):
+    def __init__(self, model, sample_path="sample", checkpoints='model.cp'):
 
         self.model = model
         self.sample_path = sample_path
@@ -42,9 +42,9 @@ class Trainer(object):
         self.scheduler = StepLR(self.optimizer, step_size=1, gamma=0.95)
 
 
-    def sample(self, bs, same_z=False):
+    def sample(self, bs):
         self.model.train(False)
-        data = torch.zeros(bs, self.model.in_channels, self.model.side_len, self.model.side_len)
+        data = torch.zeros(bs, self.model.module.in_channels, self.model.module.side_len, self.model.module.side_len)
         data = data.cuda()
 
         """
@@ -55,7 +55,7 @@ class Trainer(object):
         """
 
         for i in range(self.model.side_len):
-            for j in range(self.model.side_len):
+            for j in range(self.model.module.side_len):
                 out   = self.model(data)
 
                 data[:, :, i, j] = out[:, :, i, j]
