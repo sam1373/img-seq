@@ -29,8 +29,6 @@ class Trainer(object):
 
         self.model = model
         self.sample_path = sample_path
-        self.recon_path = recon_path
-        self.codes_path = codes_path
         self.checkpoints = checkpoints
 
         self.start_epoch = 0
