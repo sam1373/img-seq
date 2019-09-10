@@ -52,7 +52,7 @@ class Trainer(object):
             z = torch.randn([bs, self.model.z_dim]).cuda()
         """
 
-        for i in range(self.model.side_len):
+        for i in range(self.model.module.side_len):
             for j in range(self.model.module.side_len):
                 out   = self.model(data)
 
