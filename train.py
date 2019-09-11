@@ -33,17 +33,30 @@ class Trainer(object):
 
         self.start_epoch = 0
 
-        self.load_checkpoint()
-
         self.optimizer = torch.optim.Adam(self.model.parameters())
         #self.optimizer = torch.optim.SGD(self.model.parameters(), lr=0.001, momentum=0.9, nesterov=True)
-        self.scheduler = StepLR(self.optimizer, step_size=1, gamma=0.95)
+        self.scheduler = StepLR(self.optimizer, step_size=1, gamma=0.98)
+
+        self.load_checkpoint()
 
 
-    def sample(self, bs):
+    def sample(self, bs, level):
         self.model.train(False)
-        data = torch.zeros(bs, self.model.module.in_channels, self.model.module.side_len, self.model.module.side_len)
-        data = data.cuda()
+
+        print(level)
+        #TODO:actually implement this for multiple level generation
+
+        #side_len = self.model.module.side_len // (2 ** (level - 1))
+
+        side_len = self.model.module.side_len // (2 ** (self.model.module.levels - 1))
+
+        data = []
+
+        for i in range(self.model.module.levels - level + 1):
+            data.append(torch.zeros(bs, self.model.module.in_channels, side_len * side_len).cuda())
+            side_len *= 2
+
+        #data = (data_3, data_2)
 
         """
         if same_z:
@@ -52,13 +65,13 @@ class Trainer(object):
             z = torch.randn([bs, self.model.z_dim]).cuda()
         """
 
-        for i in range(self.model.module.side_len):
-            for j in range(self.model.module.side_len):
-                out   = self.model(data)
+        for i in range(data[-1].shape[2]):
+                #print(data[0].shape)
+                out = self.model(data, level=level)
 
-                data[:, :, i, j] = out[:, :, i, j]
-                
-                sep = 8
+                for j in range(len(out)):
+                    if i < data[j].shape[2]:
+                        data[j][:, :, i] = out[j].view(data[j].shape)[:, :, i]
 
                 """
                 #s = torch.sum(out[:, :, i, j], dim=1)
@@ -90,15 +103,21 @@ class Trainer(object):
 
                 #out_sample = sample_from_logistic_mix(out)
                 #data[:, :, i, j] = out_sample.data[:, :, i, j]
-                print(i, j)
+                print(i, "/", data[-1].shape[2])
         return data
 
 
-    def sample_frames(self, epoch):
+    def sample_frames(self, epoch, level):
         with torch.no_grad():
-            x_gen = self.sample(40)
-            print(x_gen.min(), x_gen.max())
-            torchvision.utils.save_image(x_gen,'%s/epoch%d.png' % (self.sample_path,epoch), nrow=10)
+            gen = self.sample(40, level)
+            #x_gen_3 = x_gen_3.view(-1, self.model.module.in_channels, self.model.module.side_len // 4, self.model.module.side_len // 4)
+            side_len = self.model.module.side_len // (2 ** (level - 1))
+            gen = gen[-1].view(-1, self.model.module.in_channels, side_len, side_len)
+
+            print(gen.min(), gen.max())
+
+            torchvision.utils.save_image(gen,'%s/epoch%d.png' % (self.sample_path,epoch), nrow=10)
+            #torchvision.utils.save_image(x_gen_2,'%s/epoch%d_14.png' % (self.sample_path,epoch), nrow=10)
 
             #x_gen = self.sample(40, same_z=True)
             #print(x_gen.min(), x_gen.max())
@@ -112,15 +131,22 @@ class Trainer(object):
             self.checkpoints)
         
     def load_checkpoint(self):
+        self.start_epoch = 0
         try:
             print("Loading Checkpoint from '{}'".format(self.checkpoints))
             checkpoint = torch.load(self.checkpoints)
             self.start_epoch = checkpoint['epoch']
             self.model.load_state_dict(checkpoint['state_dict'])
             print("Resuming Training From Epoch {}".format(self.start_epoch))
-        except:
-            print("No Checkpoint Exists At '{}'.Start Fresh Training".format(self.checkpoints))
-            self.start_epoch = 0
+        except Exception as e:
+            print(e)
+            #print("No Checkpoint Exists At '{}'.Start Fresh Training".format(self.checkpoints))
+            #self.start_epoch = 0
+
+        for i in range(self.start_epoch):
+            self.scheduler.step()
+
+        
 
     def train_model(self, trainloader, epochs=100, test_every_x=4):
 
@@ -128,6 +154,12 @@ class Trainer(object):
 
         #avgDiff = 0
         for epoch in range(self.start_epoch, epochs):
+
+           current_level = self.model.module.levels - epoch // 30
+
+           current_level = max(1, current_level)
+           
+           print("Current level:", current_level)
            #trainloader.shuffle()
            losses = []
            kld_fs = []
@@ -143,6 +175,7 @@ class Trainer(object):
            loss_type = "val"
 
            mse_loss = nn.MSELoss()
+
 
            for i, dataitem in tqdm(enumerate(trainloader, 1)):
                if i >= len(trainloader):
@@ -163,17 +196,67 @@ class Trainer(object):
 
                self.optimizer.zero_grad()
 
-               out = self.model.forward(data)
+               x0 = data#.view(-1, self.model.module.in_channels, self.side_len, self.side_len)
+               data = []
+               for j in range(1, self.model.module.levels + 1):
+                if j >= current_level:
+                    data.append(x0)
+                x0 = self.model.module.downsample(x0)
+
+               data = data[::-1]
+
+               out, logvar = self.model.forward(data, training=True, level=current_level)
+               
+
 
                #plt.imshow(out[0].permute(1, 2, 0).detach().cpu())
                #plt.show()
+
+               #data_2 = F.avg_pool2d(data, 2)
+               #data_3 = F.avg_pool2d(data_2, 2)
+
+               """
+               plt.imshow(data[0].permute(1, 2, 0).cpu())
+               plt.show()
+
+               plt.imshow(data_2[0].permute(1, 2, 0).cpu())
+               plt.show()
+
+               plt.imshow(out_2[0].permute(1, 2, 0).detach().cpu())
+               plt.show()
+               """
 
                if loss_type == "val":
 
                     #print(logvar)
                     #print(z_logvar)
 
-                    loss = mse_loss(out, data)# - logvar * 0.0001# + KLD(z_mean, z_logvar)
+                    
+
+                    #print(data_3.shape)
+                    #plt.imshow(data_3[0].permute(1, 2, 0).cpu())
+                    #plt.show()
+                    loss = logvar * 0.0001
+
+                    if (i + 1) % 10 == 0:
+                        print()
+                        print("Step", i + 1, "logvar:", logvar.item())
+
+                    for j in range(len(out)):
+                        mse_loss_j = mse_loss(out[j], data[j])
+
+                        if (i + 1) % 10 == 0:
+                            print("mse_loss res", j, ":", mse_loss_j)
+
+                        if j == len(out) - 1:
+                            mse_loss_j *= 2
+
+                        loss = loss + mse_loss_j
+
+                    #loss = mse_3 + mse_2 * 2 - logvar * 0.0001# + KLD(z_mean, z_logvar)
+
+                    if (i + 1) % 10 == 0:
+                       print()
 
                #ce
                elif loss_type == "ce":
@@ -193,12 +276,9 @@ class Trainer(object):
                
                else:
 
-                loss = discretized_mix_logistic_loss(data, out)
+                loss = discretized_mix_logistic_loss(data_3, out)
 
-               if (i + 1) % 10 == 0:
-                print()
-                print("Step", i + 1, "loss:", loss.item())
-                print()
+               
 
                loss.backward()
 
@@ -230,7 +310,7 @@ class Trainer(object):
            #sample = torch.unsqueeze(sample,0)
            sample = sample.cuda()
            if (epoch + 1) % test_every_x == 0:
-            self.sample_frames(epoch+1)
+            self.sample_frames(epoch+1, level=current_level)
             #self.recon_frame(epoch+1,sample)
             #self.umap_codes(epoch+1, trainloader)
            self.model.train()

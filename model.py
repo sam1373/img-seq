@@ -16,13 +16,31 @@ def get_causal_mask(canvas_size, see_self=True):
         mask[i, :i + 1] = 1.
     return mask.cuda()
 
-def get_pos_embeddings(side_len):
+def get_pos_enc_table(side_len, emb_dim=16):
+    ''' Init the sinusoid position encoding table '''
 
-    x = torch.arange(0., 1., 1. / side_len).view(1, 1, -1, 1).repeat(1, 1, 1, side_len)
+    # keep dim 0 for padding token position encoding zero vector
+    position_enc = np.array([
+        [pos / np.power(10000, 2 * (j // 2) / emb_dim) for j in range(emb_dim)]
+        if pos != 0 else np.zeros(emb_dim) for pos in range(side_len)])
+    
 
-    y = torch.arange(0., 1., 1. / side_len).view(1, 1, 1, -1).repeat(1, 1, side_len, 1)
+    position_enc[1:, 0::2] = np.sin(position_enc[1:, 0::2]) # apply sin on 0th,2nd,4th...emb_dim
+    position_enc[1:, 1::2] = np.cos(position_enc[1:, 1::2]) # apply cos on 1st,3rd,5th...emb_dim
+    return torch.from_numpy(position_enc).type(torch.FloatTensor)
+
+
+def get_pos_embeddings(side_len, emb_dim=16):
+
+    x = get_pos_enc_table(side_len, emb_dim).view(1, emb_dim, side_len, 1).repeat(1, 1, 1, side_len)
+
+    y = get_pos_enc_table(side_len, emb_dim).view(1, emb_dim, 1, side_len).repeat(1, 1, side_len, 1)
+
+    #print(x.shape, y.shape)
 
     return torch.cat((x, y), dim=1).cuda()
+
+
 
 #class MyDataParallel(nn.DataParallel):
 #    def __getattr__(self, name):
@@ -31,8 +49,8 @@ def get_pos_embeddings(side_len):
 
 #causal conv
 class CausalConv(nn.Conv2d):
-    def __init__(self, in_channels, out_channels, kernels, see_center=True):
-        super(CausalConv, self).__init__(in_channels, out_channels, kernels, padding=kernels//2)
+    def __init__(self, in_channels, out_channels, kernels, see_center=True, dilation=1, stride=1):
+        super(CausalConv, self).__init__(in_channels, out_channels, kernels, padding=(kernels+(kernels-1)*(dilation-1))//2, dilation=dilation, stride=stride)
         self.register_buffer('mask', self.weight.data.clone())
         _, _, kh, kw = self.weight.size()
         yc, xc = kh // 2, kw // 2
@@ -98,15 +116,39 @@ class ConvBlock(nn.Module):
 
         return x
 
+class MultiDilConvBlock(nn.Module):
+
+    def __init__(self, in_channels, out_channels, kernels=5, see_center=True):
+
+        super(MultiDilConvBlock, self).__init__()
+
+        self.conv_dil_1 = CausalConv(in_channels, out_channels // 2, kernels, dilation=1, see_center=see_center)
+
+        self.conv_dil_2 = CausalConv(in_channels, out_channels // 4, kernels, dilation=2, see_center=see_center)
+
+        self.conv_dil_3 = CausalConv(in_channels, out_channels // 4, kernels, dilation=3, see_center=see_center)
+
+    def forward(self, x):
+
+        x1 = self.conv_dil_1(x)
+        x2 = self.conv_dil_2(x)
+        x3 = self.conv_dil_3(x)
+
+        x = torch.cat((x1, x2, x3), dim=1)
+
+        return x
+
 #attention block
 class AttentionBlock(nn.Module):
 
-    def __init__(self, in_channels, K, V, side_len, bg=None):
+    def __init__(self, in_channels, K, V, side_len, bg=None, emb_dim=16):
 
         super(AttentionBlock, self).__init__()
 
 
         self.side_len = side_len
+
+        self.emb_dim = emb_dim
         #self.bg = bg
 
         #if not self.bg:
@@ -114,11 +156,11 @@ class AttentionBlock(nn.Module):
 
         self.mask = get_causal_mask(side_len ** 2)
 
-        self.q_conv = nn.Sequential(nn.Conv1d(in_channels + 2, K, 1), nn.ReLU())
+        self.q_conv = nn.Sequential(nn.Conv1d(in_channels + emb_dim * 2, K, 1), nn.ELU())
 
-        self.k_conv = nn.Sequential(nn.Conv1d(in_channels + 2, K, 1), nn.ReLU())
+        self.k_conv = nn.Sequential(nn.Conv1d(in_channels + emb_dim * 2, K, 1), nn.ELU())
 
-        self.v_conv = nn.Sequential(nn.Conv1d(in_channels + 2, V, 1), nn.ReLU())
+        self.v_conv = nn.Sequential(nn.Conv1d(in_channels + emb_dim * 2, V, 1), nn.ELU())
 
         self.fc = nn.Sequential(nn.Conv1d(V, V, 1), nn.ReLU())
 
@@ -128,11 +170,14 @@ class AttentionBlock(nn.Module):
 
         orig_shape = x.shape
 
-        pos_emb = get_pos_embeddings(self.side_len).repeat(orig_shape[0], 1, 1, 1)
+        pos_emb = get_pos_embeddings(self.side_len, self.emb_dim).repeat(orig_shape[0], 1, 1, 1)
+
+        #print(pos_emb.shape)
+        #input()
 
         x0 = torch.cat((x, pos_emb), dim=1)
 
-        x0 = x0.view(orig_shape[0], orig_shape[1] + 2, -1)
+        x0 = x0.view(orig_shape[0], orig_shape[1] + self.emb_dim * 2, -1)
 
         q = self.q_conv(x0)
 
@@ -168,15 +213,15 @@ class AttentionBlock(nn.Module):
         #print(attn_masked.shape, v.shape)
 
         #use attn_masked
-        out = torch.bmm(attn_masked, v.transpose(-2, -1)).transpose(-2, -1)
+        out1 = torch.bmm(attn_masked, v.transpose(-2, -1)).transpose(-2, -1)
 
-        out = self.fc(out)
+        out2 = out1 + self.fc(out1)
 
-        out = out.view(orig_shape[0], self.out_channels, orig_shape[2], orig_shape[3])
+        out2 = out1.view(orig_shape[0], self.out_channels, orig_shape[2], orig_shape[3])
 
-        out = x + out
+        #out = x + out
 
-        return out
+        return out2
 
 
 class SnailBlock(nn.Module):
@@ -345,55 +390,29 @@ class PixelCNN(nn.Module):
         self.out_channels = out_channels
 
 
-        self.z_dim = z_dim
-
-        self.z_model_conv = nn.Sequential(nn.Conv2d(in_channels, 64, kernels, padding=kernels//2), nn.ELU(),
-                                          nn.Conv2d(64, 32, kernels, padding=kernels//2), nn.ELU(),
-                                          nn.Conv2d(32, 16, kernels, padding=kernels//2), nn.ELU(),
-                                          nn.Conv2d(16, 4, 1),nn.ELU())
-        self.z_model_flat = nn.Sequential(nn.Linear(4 * self.canvas_size, z_dim * 2))
-
         self.in_l = nn.Sequential(CausalConv(in_channels, channels, kernels, see_center=False), nn.BatchNorm2d(channels), nn.ELU())
 
         self.layers = []
 
         for i in range(total_convs):
-            l = CausalConv(channels, channels, kernels, see_center=True)
-            #self.layers.append(nn.Sequential(l, nn.BatchNorm2d(channels), nn.ELU()))
-            self.layers.append(nn.Sequential(l, AttentionBlock(channels, K=16, V=channels, side_len=self.side_len), nn.BatchNorm2d(channels), nn.ELU()))
+            l = MultiDilConvBlock(channels, channels, kernels)
+            #l = CausalConv(channels, channels, kernels, see_center=True)
+            self.layers.append(nn.Sequential(l, nn.BatchNorm2d(channels), nn.ELU()))
+            #self.layers.append(nn.Sequential(l, AttentionBlock(channels, K=16, V=channels, side_len=self.side_len), nn.BatchNorm2d(channels), nn.ELU()))
         self.out_l = nn.Sequential(nn.Conv2d(channels, out_channels, 1), nn.Sigmoid())
 
         self.final = nn.Sequential(nn.Conv2d(out_channels // 2, channels, 1), nn.ELU(), nn.Conv2d(channels, in_channels, 1), nn.Sigmoid())
 
         self.layers = nn.Sequential(*self.layers)
 
-        #self.in_l = nn.DataParallel(self.in_l)
-        #self.layers = nn.DataParallel(self.layers)
-        #self.out_l = nn.DataParallel(self.out_l)
-        #self.final = nn.DataParallel(self.final)
-
         self.cuda()
 
 
-    def forward(self, x, z=None, training=False):
+    def forward(self, x, training=False):
 
 
         bs = x.shape[0]
 
-        """
-        if training:
-
-            z_conv = self.z_model_conv(x)
-            z_flat = z_conv.view(bs, -1)
-            z_flat = self.z_model_flat(z_flat)
-            z_mean = z_flat[:, :self.z_dim]
-            z_logvar = z_flat[:, self.z_dim:]
-
-            z = torch.randn(self.z_dim).cuda()
-            z = z * torch.exp(z_logvar * 0.5) + z_mean
-
-            #print(z.shape)
-        """
 
         x = self.in_l(x)
 
@@ -401,9 +420,6 @@ class PixelCNN(nn.Module):
 
         past_out = []
 
-        #orig_shape = x.shape
-
-        #x = x.view(bs, x.shape[1], -1)
 
         for l in self.layers:
             x = l(x)
@@ -417,13 +433,6 @@ class PixelCNN(nn.Module):
                     j = self.total_convs - i - 1
                     x = x + past_out[j]
 
-        #x = x.view(*orig_shape)
-
-
-        #z0 = z.view(bs, self.z_dim, 1, 1).repeat(1, 1, self.side_len, self.side_len)
-
-        #x = torch.cat((x, z0), dim=1)
-
         x = self.out_l(x)
 
 
@@ -435,36 +444,298 @@ class PixelCNN(nn.Module):
 
         x = x * torch.exp(logvar * 0.5) + mean
 
-        #z = z * torch.exp(log_var) + mean
 
         x = self.final(x)
 
-        #if training:
-        #    return x, torch.mean(logvar)#, z_mean, z_logvar
-
         return x
 
-    """
-    def gen_img(self, batch_size=32):
 
-        x = torch.zeros([batch_size, self.in_channels, self.canvas_size]).cuda()
 
-        for i in range(self.canvas_size):
-            l = self.forward(x.view(-1, self.in_channels, self.side_len, self.side_len))
-            out = sample_from_logistic_mix(l)
+class PixelCNNProg(nn.Module):
 
-            out = out.view(-1, self.in_channels, self.canvas_size)
+    def __init__(self, side_len=64, in_channels=3, channels=64, out_channels=100, total_attn=7, kernels=5, levels=3):
 
-            x[:, :, i] = out[:, :, i]
-            print(i + 1, "done")
+        super(PixelCNNProg, self).__init__()
 
-        return x
-    """
+        self.canvas_size = side_len * side_len
+        self.in_channels = in_channels
+        self.side_len = side_len
+        self.total_attn = total_attn
+        self.out_channels = out_channels
+        self.levels = levels
+
+        self.downsample = nn.AvgPool2d(2)#CausalConv(in_channels, in_channels, 3, see_center=False, dilation=2, stride=2)
+
+        #self.in_l = nn.Sequential(CausalConv(in_channels, channels, kernels, see_center=False), nn.BatchNorm2d(channels), nn.ELU())
+        self.level_in = nn.ModuleList()
+
+        self.level_out = nn.ModuleList()
+
+        self.level_latent = nn.ModuleList()
+
+        self.level_final = nn.ModuleList()
+
+        self.level_up = nn.ModuleList()
+
+        for i in range(self.levels):
+            #if i > 0:
+            self.level_in.append(nn.Sequential(CausalConv(in_channels, channels, kernels, see_center=False), nn.BatchNorm2d(channels), nn.ELU(),
+                                        ConvBlock(channels, kernels), nn.BatchNorm2d(channels), ConvBlock(channels, kernels), nn.BatchNorm2d(channels)))
+
+            self.level_out.append(nn.Sequential(CausalConv(channels * (2 if i > 0 else 1), channels, kernels), nn.BatchNorm2d(channels), nn.ELU(),
+                                             ConvBlock(channels, kernels), nn.BatchNorm2d(channels), ConvBlock(channels, kernels), nn.BatchNorm2d(channels)))
+            #else:
+            #    self.level_in.append(nn.Sequential(CausalConv(in_channels, channels, kernels, see_center=False), nn.BatchNorm2d(channels), nn.ELU(),
+            #                            CausalConv(channels, channels, kernels), nn.BatchNorm2d(channels), nn.ELU()).cuda())
+            #    self.level_out.append(nn.Sequential(CausalConv(channels, channels, kernels), nn.BatchNorm2d(channels), nn.ELU(),
+            #                             CausalConv(channels, channels, kernels), nn.BatchNorm2d(channels), nn.ELU()).cuda())
+
+            self.level_latent.append(nn.Sequential(nn.Conv2d(channels, out_channels, 1), nn.Tanh()))
+            
+            self.level_final.append(nn.Sequential(nn.Conv2d(out_channels // 2, channels, 1), nn.Conv2d(channels, in_channels, 1), nn.Sigmoid()))
+
+            if i < self.levels - 1:
+                self.level_up.append(nn.ConvTranspose2d(channels, channels, 2, stride=2))
+
+
+        """
+        self.level_3_in = nn.Sequential(CausalConv(in_channels, channels, kernels, see_center=False), nn.BatchNorm2d(channels), nn.ELU(),
+                                        CausalConv(channels, channels, kernels), nn.BatchNorm2d(channels), nn.ELU())
+
+        self.level_3_out = nn.Sequential(CausalConv(channels, channels, kernels), nn.BatchNorm2d(channels), nn.ELU(),
+                                         CausalConv(channels, channels, kernels), nn.BatchNorm2d(channels), nn.ELU())
+
+        self.level_3_up = nn.ConvTranspose2d(channels, channels, 2, stride=2)
+
+        self.level_2_in = nn.Sequential(CausalConv(in_channels, channels, kernels, see_center=False), nn.BatchNorm2d(channels), nn.ELU(),
+                                        ConvBlock(channels, kernels), nn.BatchNorm2d(channels), ConvBlock(channels, kernels), nn.BatchNorm2d(channels))
+
+        self.level_2_out = nn.Sequential(CausalConv(channels * 2, channels, kernels), nn.BatchNorm2d(channels), nn.ELU(),
+                                         ConvBlock(channels, kernels), nn.BatchNorm2d(channels), ConvBlock(channels, kernels), nn.BatchNorm2d(channels))
+
+        self.level_2_up = nn.ConvTranspose2d(channels, channels, 2, stride=2)
+
+        self.level_1_in = nn.Sequential(CausalConv(in_channels, channels, kernels, see_center=False), nn.BatchNorm2d(channels), nn.ELU(),
+                                        CausalConv(channels, channels, kernels), nn.BatchNorm2d(channels), nn.ELU())
+
+        self.level_1_out = nn.Sequential(CausalConv(channels * 2, channels, kernels), nn.BatchNorm2d(channels), nn.ELU(),
+                                         CausalConv(channels, channels, kernels), nn.BatchNorm2d(channels), nn.ELU())
+        """
+
+        self.layers_attn = []
+
+        for i in range(total_attn):
+            in0 = channels
+            if i > self.total_attn // 2:
+                in0 *= 2
+            self.layers_attn.append(nn.Sequential(#CausalConv(channels, channels, kernels),
+                                                  AttentionBlock(in0, K=channels, V=channels, side_len=self.side_len // (2 ** (self.levels - 1))),
+                                                  nn.BatchNorm2d(channels), nn.ELU()))
+            #self.layers_attn.append(nn.Sequential(AttentionBlock(channels, K=channels, V=channels, side_len=self.side_len // 4), nn.BatchNorm2d(channels), nn.ELU()))
+
+
+        #self.out_l = nn.Sequential(nn.Conv2d(channels, out_channels, 1), nn.Tanh())
+
+        #self.out_2 = nn.Sequential(nn.Conv2d(channels, out_channels, 1), nn.Tanh())
+
+        #self.out_1 = nn.Sequential(nn.Conv2d(channels, out_channels, 1), nn.Tanh())
+
+        #self.final = nn.Sequential(nn.Conv2d(out_channels // 2, channels, 1), nn.ELU(), nn.Conv2d(channels, in_channels, 1), nn.Sigmoid())
+
+        #self.final_2 = nn.Sequential(nn.Conv2d(out_channels // 2, channels, 1), nn.ELU(), nn.Conv2d(channels, in_channels, 1), nn.Sigmoid())
+
+        self.layers_attn = nn.Sequential(*self.layers_attn)
+
+        self.cuda()
+
+
+    def forward(self, x, level=1, training=False):
+
+
+        #x is list/tuple with resolutions starting from lowest
+
+        """
+        if training:
+            x0 = x.view(-1, self.in_channels, self.side_len, self.side_len)
+            x = []
+            for i in range(self.levels):
+                x.append(x0)
+                x0 = self.downsample(x0)
+
+            x = x[::-1]
+            #x1 = x
+            #x2 = self.downsample(x1)
+            #x3 = self.downsample(x2)
+
+            #x1 = x1.view(-1, self.in_channels, self.side_len)
+        """
+
+        if (not training) and len(x[0].shape) == 3:
+
+            x0 = x
+            x = []
+            for i in x0:
+                cur_side = int(i.shape[2] ** 0.5)
+                x.append(i.view(-1, self.in_channels, cur_side, cur_side))
+                cur_side //= 2
+
+        #x2 = x2.view(-1, self.in_channels, self.side_len // 2, self.side_len // 2)
+        #x3 = x3.view(-1, self.in_channels, self.side_len // 4, self.side_len // 4)
+
+            #print(x1.shape, x2.shape, x3.shape)
+        bs = x[0].shape[0]
+
+        outs = []
+
+        pix = []
+
+
+        for i, x0 in enumerate(x):
+
+
+            x0 = self.level_in[i](x0)
+
+            if i == 0:
+                past_out = []
+
+                j = 0
+
+                for j, l in enumerate(self.layers_attn):
+                    
+                    if j < self.total_attn // 2:
+                        x0 = l(x0)
+                        past_out.append(x0)
+                        #print(1)
+                    elif j > self.total_attn // 2:
+                        #print(2)
+                        k = self.total_attn - j - 1
+                        x0 = torch.cat((x0, past_out[k]), dim=1)
+                        x0 = l(x0)
+                    else:
+                        x0 = l(x0)
+            else:
+                prev = self.level_up[i - 1](outs[-1])
+                x0 = torch.cat((x0, prev), dim=1)
+
+            x0 = self.level_out[i](x0)
+
+            outs.append(x0)
+
+            x0 = self.level_latent[i](x0)
+
+            mean = x0[:, :self.out_channels // 2]
+            logvar = x0[:, self.out_channels // 2:] * 3
+
+            if i == 0:
+                lv_mean = logvar.mean()
+
+            side_len = x0.shape[2]
+
+            out = torch.randn(bs, self.out_channels // 2, side_len, side_len).cuda()
+
+            out = out * torch.exp(logvar * 0.5) + mean
+
+            out = self.level_final[i](out)
+
+            pix.append(out)
+
+        """
+        if level <= 3:
+
+            x3 = self.level_3_in(x3)
+
+            past_out = []
+
+            for i, l in enumerate(self.layers_attn):
+                
+                if i < self.total_attn // 2:
+                    x3 = l(x3)
+                    i += 1
+                    past_out.append(x3)
+                    #print(1)
+                elif i > self.total_attn // 2:
+                    #print(2)
+                    j = self.total_attn - i - 1
+                    x3 = torch.cat((x3, past_out[j]), dim=1)
+                    x3 = l(x3)
+                else:
+                    x3 = l(x3)
+
+            x3 = self.level_3_out(x3)
+
+            #x3_out = self.out_l(x3)
+
+            outs.append(x3)
+
+        if level <= 2:
+
+            x2 = self.level_2_in(x2)
+
+            x3 = self.level_3_up(x3)
+
+            x2 = torch.cat((x2, x3), dim=1)
+
+            x2 = self.level_2_out(x2)
+
+            #x2_out = self.out_2(x2)
+
+            outs.append(x2)
+
+        if level <= 1:
+
+            x1 = self.level_1_in(x1)
+
+            x2 = self.level_2_up(x2)
+
+            x1 = torch.cat((x1, x2), dim=1)
+
+            x1 = self.level_2_out(x1)
+
+            #x1_out = self.out_1(x1)
+
+            outs.append(x1)
+
+        
+
+        pix = []
+
+        lv_mean = None
+
+        for i, out in enumerate(outs):
+
+            out = self.out_l(out)
+
+            mean = out[:, :self.out_channels // 2]
+            logvar = out[:, self.out_channels // 2:] * 3
+
+            if i == 0:
+                lv_mean = logvar.mean()
+
+            side_len = out.shape[2]
+
+            out = torch.randn(bs, self.out_channels // 2, side_len, side_len).cuda()
+
+            out = out * torch.exp(logvar * 0.5) + mean
+
+            if i == 0:
+                pix.append(self.final(out))
+            else:
+                pix.append(self.final_2(out))
+
+        """
+
+        if training:
+            return pix, lv_mean
+
+        return pix
 
 
 if __name__ == '__main__':
 
-
+    pos_enc_table = get_pos_enc_table(7)
+    print(pos_enc_table)
+    print(pos_enc_table.shape)
+    input()
 
     inp = torch.randn((32, 3, 16, 16)).cuda()
 

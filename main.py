@@ -10,7 +10,7 @@ from model import *
 
 import matplotlib.pyplot as plt
 
-#from data import CelebaDataset
+from data import CelebaDataset
 
 import numpy as np
 
@@ -22,7 +22,8 @@ batch_size = 128
 sep = 8
 
 #model = ImgAttendModel(side_len=16, kernels=3, channels=128, blocks_rep=4, conv_rep=4)
-model = PixelCNN(side_len=16, kernels=7, in_channels=3, channels=128, out_channels=200)
+#model = PixelCNN(side_len=16, kernels=5, in_channels=3, channels=128, out_channels=200)
+model = PixelCNNProg(side_len=28, kernels=5, in_channels=3, channels=128, out_channels=200, total_attn=9)
 model = nn.DataParallel(model)
 
 total = 0
@@ -45,7 +46,7 @@ local = True
 if dataset == "CelebA":
   train_dataset = CelebaDataset(txt_path='/home/samuel/Data/CelebAligned/list_attr_celeba.txt',
                                 img_dir='/home/samuel/Data/CelebAligned/',
-                                transform=custom_transform, in_size=model.side_len)
+                                transform=custom_transform, in_size=model.module.side_len)
 
   trainloader = DataLoader(dataset=train_dataset,
                             batch_size=batch_size,
@@ -62,7 +63,7 @@ elif dataset == "MNIST":
   trainloader = torch.utils.data.DataLoader(
     torchvision.datasets.MNIST(data_path, train=True, download=True,
                                transform=torchvision.transforms.Compose([
-                                 transforms.Resize((16, 16)),
+                                 #transforms.Resize((16, 16)),
                                  transforms.ToTensor(),
                                  #rescaling
                                  #transforms
@@ -99,10 +100,7 @@ trainer = Trainer(model, sample_path=sample_path)
 
 trainer.model.eval()
 
-#trainer.umap_codes(0, trainloader)
-#trainer.sample_frames(0)
-#trainer.recon_frame(0, sample)
+trainer.sample_frames(0, level=3)
 
-
-trainer.train_model(trainloader, test_every_x=1, epochs=100)
+trainer.train_model(trainloader, test_every_x=1, epochs=200)
 
