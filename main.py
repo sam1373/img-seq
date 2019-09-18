@@ -102,5 +102,5 @@ trainer.model.eval()
 
 trainer.sample_frames(0, level=3)
 
-trainer.train_model(trainloader, test_every_x=1, epochs=200)
+trainer.train_model(trainloader, test_every_x=5, epochs=300)
 

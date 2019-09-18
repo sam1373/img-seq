@@ -49,43 +49,32 @@ def get_pos_embeddings(side_len, emb_dim=16):
 
 #causal conv
 class CausalConv(nn.Conv2d):
-    def __init__(self, in_channels, out_channels, kernels, see_center=True, dilation=1, stride=1):
-        super(CausalConv, self).__init__(in_channels, out_channels, kernels, padding=(kernels+(kernels-1)*(dilation-1))//2, dilation=dilation, stride=stride)
+    def __init__(self, in_channels, out_channels, kernels, see_center=True, dilation=1, stride=1, groups=1, sep=False):
+
+        gr1 = in_channels if sep else groups
+
+        super(CausalConv, self).__init__(in_channels, out_channels if not sep else in_channels, kernels, padding=(kernels+(kernels-1)*(dilation-1))//2, dilation=dilation, stride=stride, groups=gr1)
         self.register_buffer('mask', self.weight.data.clone())
         _, _, kh, kw = self.weight.size()
         yc, xc = kh // 2, kw // 2
-        #self.mask.fill_(1)
 
         pre_mask = np.ones(self.weight.shape)
-
-        """
-        # same pixel masking - pixel won't access next color (conv filter dim)
-        def bmask(i_out, i_in):
-            cout_idx = np.expand_dims(np.arange(out_channels) // 3 == i_out, 1)
-            cin_idx = np.expand_dims(np.arange(in_channels) // 3 == i_in, 0)
-            a1, a2 = np.broadcast_arrays(cout_idx, cin_idx)
-            return a1 * a2
-
-        for j in range(3):
-            pre_mask[bmask(j, j), yc, xc] = 1.0 if see_center else 0.0
-
-        pre_mask[bmask(0, 1), yc, xc] = 0.0
-        pre_mask[bmask(0, 2), yc, xc] = 0.0
-        pre_mask[bmask(1, 2), yc, xc] = 0.0
-        """
 
         pre_mask[:, :, yc, xc + see_center:] = 0
         pre_mask[:, :, yc + 1:] = 0
 
         self.mask = torch.Tensor(pre_mask)
 
+        if sep:
+            self.conv1x1 = nn.Conv2d(in_channels, out_channels, 1, groups=groups)
 
-        #self.bn = nn.BatchNorm2d(out_channels)
+        self.sep = sep
 
     def forward(self, x):
         self.weight.data *= self.mask
         x = super(CausalConv, self).forward(x)
-        #x = self.bn(x)
+        if self.sep:
+            x = self.conv1x1(x)
         return x
 
 class ConvBlock(nn.Module):
@@ -477,25 +466,53 @@ class PixelCNNProg(nn.Module):
 
         self.level_up = nn.ModuleList()
 
-        for i in range(self.levels):
-            #if i > 0:
-            self.level_in.append(nn.Sequential(CausalConv(in_channels, channels, kernels, see_center=False), nn.BatchNorm2d(channels), nn.ELU(),
-                                        ConvBlock(channels, kernels), nn.BatchNorm2d(channels), ConvBlock(channels, kernels), nn.BatchNorm2d(channels)))
+        conv_rep = 1
 
-            self.level_out.append(nn.Sequential(CausalConv(channels * (2 if i > 0 else 1), channels, kernels), nn.BatchNorm2d(channels), nn.ELU(),
-                                             ConvBlock(channels, kernels), nn.BatchNorm2d(channels), ConvBlock(channels, kernels), nn.BatchNorm2d(channels)))
+        for i in range(self.levels):
+
+            conv_rep += 1
+
+            gr = 1
+            sep = True
+
+            level_in_cur = [CausalConv(in_channels, channels, kernels, see_center=False), nn.BatchNorm2d(channels), nn.ELU()]
+
+            for j in range(conv_rep):
+                level_in_cur.append(CausalConv(channels, channels, kernels, dilation=2, groups=gr, sep=sep))
+                level_in_cur.append(nn.BatchNorm2d(channels))
+                level_in_cur.append(nn.ELU())
+
+            self.level_in.append(nn.Sequential(*level_in_cur))
+
+            level_out_cur = [CausalConv(channels * (2 if i > 0 else 1), channels, kernels, groups=gr, sep=sep), nn.BatchNorm2d(channels), nn.ELU()]
+
+            for j in range(conv_rep):
+                level_out_cur.append(CausalConv(2 * channels, channels, kernels, dilation=2, groups=gr, sep=sep))
+                level_out_cur.append(nn.BatchNorm2d(channels))
+                level_out_cur.append(nn.ELU())
+
+            self.level_out.append(nn.Sequential(*level_out_cur))
+
+
+            #if i > 0:
+            #self.level_in.append(nn.Sequential(CausalConv(in_channels, channels, kernels, see_center=False), nn.BatchNorm2d(channels), nn.ELU(),
+            #                            ConvBlock(channels, kernels), nn.BatchNorm2d(channels), ConvBlock(channels, kernels), nn.BatchNorm2d(channels)))
+
+            #self.level_out.append(nn.Sequential(CausalConv(channels * (2 if i > 0 else 1), channels, kernels), nn.BatchNorm2d(channels), nn.ELU(),
+            #                             ConvBlock(channels, kernels), nn.BatchNorm2d(channels), ConvBlock(channels, kernels), nn.BatchNorm2d(channels)))
             #else:
             #    self.level_in.append(nn.Sequential(CausalConv(in_channels, channels, kernels, see_center=False), nn.BatchNorm2d(channels), nn.ELU(),
-            #                            CausalConv(channels, channels, kernels), nn.BatchNorm2d(channels), nn.ELU()).cuda())
+            #                            CausalConv(channels, channels, kernels), nn.BatchNorm2d(channels), nn.ELU()))
             #    self.level_out.append(nn.Sequential(CausalConv(channels, channels, kernels), nn.BatchNorm2d(channels), nn.ELU(),
-            #                             CausalConv(channels, channels, kernels), nn.BatchNorm2d(channels), nn.ELU()).cuda())
+            #                             CausalConv(channels, channels, kernels), nn.BatchNorm2d(channels), nn.ELU()))
 
-            self.level_latent.append(nn.Sequential(nn.Conv2d(channels, out_channels, 1), nn.Tanh()))
-            
-            self.level_final.append(nn.Sequential(nn.Conv2d(out_channels // 2, channels, 1), nn.Conv2d(channels, in_channels, 1), nn.Sigmoid()))
+            #self.level_latent.append(nn.Sequential(nn.Conv2d(channels, channels, 1), nn.ELU(), nn.Conv2d(channels, out_channels, 1))) #Tanh
+            self.level_latent.append(nn.Sequential(nn.Conv2d(channels * 2, out_channels, 1), nn.Tanh())) #Tanh
+
+            self.level_final.append(nn.Sequential(nn.Conv2d(out_channels // 2, channels, 1), nn.ELU(), nn.Conv2d(channels, in_channels, 1), nn.Sigmoid()))
 
             if i < self.levels - 1:
-                self.level_up.append(nn.ConvTranspose2d(channels, channels, 2, stride=2))
+                self.level_up.append(nn.ConvTranspose2d(channels * 2, channels, 2, stride=2))
 
 
         """
@@ -549,7 +566,7 @@ class PixelCNNProg(nn.Module):
         self.cuda()
 
 
-    def forward(self, x, level=1, training=False):
+    def forward(self, x, level=1, training=False, var_mult=1.):
 
 
         #x is list/tuple with resolutions starting from lowest
@@ -592,8 +609,20 @@ class PixelCNNProg(nn.Module):
 
         for i, x0 in enumerate(x):
 
+            outer_past = []
 
-            x0 = self.level_in[i](x0)
+            for j, l in enumerate(self.level_in[i]):
+
+                #print(j, l)
+                #print(x0.shape)
+
+                x0 = l(x0)
+
+                if j % 3 == 2:
+                    outer_past.append(x0)
+
+
+            #x0 = self.level_in[i](x0)
 
             if i == 0:
                 past_out = []
@@ -617,12 +646,30 @@ class PixelCNNProg(nn.Module):
                 prev = self.level_up[i - 1](outs[-1])
                 x0 = torch.cat((x0, prev), dim=1)
 
-            x0 = self.level_out[i](x0)
+
+            for j, l in enumerate(self.level_out[i]):
+
+                #print(j, l)
+                #print(x0.shape)
+                
+                x0 = l(x0)
+
+                if j % 3 == 2:
+                    x0 = torch.cat((x0, outer_past[-1 - (j // 3)]), dim=1)
+
+            #x0 = self.level_out[i](x0)
 
             outs.append(x0)
 
+
+            
+
             x0 = self.level_latent[i](x0)
 
+          
+            #pix.append(x0)
+
+            
             mean = x0[:, :self.out_channels // 2]
             logvar = x0[:, self.out_channels // 2:] * 3
 
@@ -633,11 +680,15 @@ class PixelCNNProg(nn.Module):
 
             out = torch.randn(bs, self.out_channels // 2, side_len, side_len).cuda()
 
-            out = out * torch.exp(logvar * 0.5) + mean
+            out = out * torch.exp(logvar * 0.5) * var_mult + mean
 
             out = self.level_final[i](out)
 
             pix.append(out)
+
+            
+
+            
 
         """
         if level <= 3:
@@ -723,6 +774,7 @@ class PixelCNNProg(nn.Module):
                 pix.append(self.final_2(out))
 
         """
+        #lv_mean = torch.Tensor([0]).cuda()
 
         if training:
             return pix, lv_mean

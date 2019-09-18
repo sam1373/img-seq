@@ -40,7 +40,7 @@ class Trainer(object):
         self.load_checkpoint()
 
 
-    def sample(self, bs, level):
+    def sample(self, bs, level, var_mult):
         self.model.train(False)
 
         print(level)
@@ -67,11 +67,15 @@ class Trainer(object):
 
         for i in range(data[-1].shape[2]):
                 #print(data[0].shape)
-                out = self.model(data, level=level)
+                out = self.model(data, level=level, var_mult=var_mult)
 
                 for j in range(len(out)):
                     if i < data[j].shape[2]:
-                        data[j][:, :, i] = out[j].view(data[j].shape)[:, :, i]
+                        cur_out = out[j].view(data[j].shape[0], out[j].shape[1], data[j].shape[2])[:, :, i]
+                        #sample = sample_from_logistic_mix(out[j])
+                        #cur_out = sample.view(data[j].shape)[:, :, i]
+                        
+                        data[j][:, :, i] = cur_out
 
                 """
                 #s = torch.sum(out[:, :, i, j], dim=1)
@@ -107,12 +111,14 @@ class Trainer(object):
         return data
 
 
-    def sample_frames(self, epoch, level):
+    def sample_frames(self, epoch, level, var_mult=1.):
         with torch.no_grad():
-            gen = self.sample(40, level)
+            gen = self.sample(40, level, var_mult)
             #x_gen_3 = x_gen_3.view(-1, self.model.module.in_channels, self.model.module.side_len // 4, self.model.module.side_len // 4)
             side_len = self.model.module.side_len // (2 ** (level - 1))
             gen = gen[-1].view(-1, self.model.module.in_channels, side_len, side_len)
+
+            #gen = gen / 2. + 0.5
 
             print(gen.min(), gen.max())
 
@@ -148,17 +154,17 @@ class Trainer(object):
 
         
 
-    def train_model(self, trainloader, epochs=100, test_every_x=4):
+    def train_model(self, trainloader, epochs=100, test_every_x=4, epochs_per_level=50):
 
         self.model.train()
 
         #avgDiff = 0
         for epoch in range(self.start_epoch, epochs):
 
-           current_level = self.model.module.levels - epoch // 30
+           current_level = self.model.module.levels - epoch // epochs_per_level
 
            current_level = max(1, current_level)
-           
+
            print("Current level:", current_level)
            #trainloader.shuffle()
            losses = []
@@ -192,6 +198,8 @@ class Trainer(object):
                 #plt.show()
                 #input()
 
+               #data = (data - 0.5) * 2
+
                data = Variable(data)
 
                self.optimizer.zero_grad()
@@ -216,15 +224,13 @@ class Trainer(object):
                #data_3 = F.avg_pool2d(data_2, 2)
 
                """
-               plt.imshow(data[0].permute(1, 2, 0).cpu())
+               plt.imshow(data[-1][0].permute(1, 2, 0).cpu())
                plt.show()
 
-               plt.imshow(data_2[0].permute(1, 2, 0).cpu())
-               plt.show()
-
-               plt.imshow(out_2[0].permute(1, 2, 0).detach().cpu())
+               plt.imshow(out[-1][0].permute(1, 2, 0).detach().cpu())
                plt.show()
                """
+               
 
                if loss_type == "val":
 
@@ -236,22 +242,27 @@ class Trainer(object):
                     #print(data_3.shape)
                     #plt.imshow(data_3[0].permute(1, 2, 0).cpu())
                     #plt.show()
-                    loss = logvar * 0.0001
+
+                    loss = 0
+
+                    loss += -logvar * 0.0001#0.0002
 
                     if (i + 1) % 10 == 0:
                         print()
-                        print("Step", i + 1, "logvar:", logvar.item())
+                        print("Step", i + 1)
+                        print("logvar:", logvar.item())
 
                     for j in range(len(out)):
-                        mse_loss_j = mse_loss(out[j], data[j])
+                        #loss_j = discretized_mix_logistic_loss(data[j], out[j])
+                        loss_j = mse_loss(out[j], data[j])
 
                         if (i + 1) % 10 == 0:
-                            print("mse_loss res", j, ":", mse_loss_j)
+                            print("loss res", j, ":", loss_j)
 
                         if j == len(out) - 1:
-                            mse_loss_j *= 2
+                            loss_j *= (len(out))
 
-                        loss = loss + mse_loss_j
+                        loss = loss + loss_j
 
                     #loss = mse_3 + mse_2 * 2 - logvar * 0.0001# + KLD(z_mean, z_logvar)
 
@@ -283,7 +294,7 @@ class Trainer(object):
                loss.backward()
 
 
-               torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.25)
+               torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.001)
 
                self.optimizer.step()
 
