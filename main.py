@@ -88,7 +88,15 @@ print(sample.shape)
 #input()
 
 #sample = torch.unsqueeze(sample,0)
+
 sample = sample.cuda()
+
+if sample.shape[1] == 1:
+  sample = sample.repeat(1, 3, 1, 1)
+  bs = sample.shape[0]
+  sample *= torch.rand([bs, 3, 1, 1]).cuda()
+
+
 
 
 sample_path = "sample"
@@ -100,7 +108,8 @@ trainer = Trainer(model, sample_path=sample_path)
 
 trainer.model.eval()
 
+trainer.recon_frames(0, sample, level=3)
 trainer.sample_frames(0, level=3)
 
-trainer.train_model(trainloader, test_every_x=5, epochs=300)
+trainer.train_model(trainloader, test_every_x=5, epochs=300, epochs_per_level=20)
 

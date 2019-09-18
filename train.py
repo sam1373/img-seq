@@ -128,6 +128,27 @@ class Trainer(object):
             #x_gen = self.sample(40, same_z=True)
             #print(x_gen.min(), x_gen.max())
             #torchvision.utils.save_image(x_gen,'%s/epoch%d_same.png' % (self.sample_path,epoch), nrow=10)
+
+    def recon_frames(self, epoch, x, level):
+
+        with torch.no_grad():
+            side_len = self.model.module.side_len // (2 ** (level - 1))
+
+            img_use = 10
+
+            x0 = x[:img_use]
+            data = []
+            for j in range(1, self.model.module.levels + 1):
+                if j >= level:
+                    data.append(x0)
+                x0 = self.model.module.downsample(x0)
+
+            data = data[::-1]
+
+            recon, _ = self.model(data, level=level, training=True)
+            recon = recon[-1].view(-1, self.model.module.in_channels, side_len, side_len)
+            imgs_with_recon = torch.cat((data[-1], recon), dim=0)
+            torchvision.utils.save_image(imgs_with_recon, '%s/recon_epoch%d.png' % (self.sample_path,epoch), nrow=10)
     
     def save_checkpoint(self,epoch):
         torch.save({
@@ -231,6 +252,7 @@ class Trainer(object):
                plt.show()
                """
                
+               
 
                if loss_type == "val":
 
@@ -319,10 +341,18 @@ class Trainer(object):
            self.model.eval()
            _, (sample, _)  = next(enumerate(trainloader))
            #sample = torch.unsqueeze(sample,0)
+
+
            sample = sample.cuda()
+
+           if sample.shape[1] == 1:
+               sample = sample.repeat(1, 3, 1, 1)
+               bs = sample.shape[0]
+               sample *= torch.rand([bs, 3, 1, 1]).cuda()
+
            if (epoch + 1) % test_every_x == 0:
+            self.recon_frames(epoch+1, sample, level=current_level)
             self.sample_frames(epoch+1, level=current_level)
-            #self.recon_frame(epoch+1,sample)
             #self.umap_codes(epoch+1, trainloader)
            self.model.train()
         print("Training is complete")

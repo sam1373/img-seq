@@ -130,7 +130,7 @@ class MultiDilConvBlock(nn.Module):
 #attention block
 class AttentionBlock(nn.Module):
 
-    def __init__(self, in_channels, K, V, side_len, bg=None, emb_dim=16):
+    def __init__(self, in_channels, K, V, side_len, nonlin, bg=None, emb_dim=16):
 
         super(AttentionBlock, self).__init__()
 
@@ -145,11 +145,11 @@ class AttentionBlock(nn.Module):
 
         self.mask = get_causal_mask(side_len ** 2)
 
-        self.q_conv = nn.Sequential(nn.Conv1d(in_channels + emb_dim * 2, K, 1), nn.ELU())
+        self.q_conv = nn.Sequential(nn.Conv1d(in_channels + emb_dim * 2, K, 1), nonlin)
 
-        self.k_conv = nn.Sequential(nn.Conv1d(in_channels + emb_dim * 2, K, 1), nn.ELU())
+        self.k_conv = nn.Sequential(nn.Conv1d(in_channels + emb_dim * 2, K, 1), nonlin)
 
-        self.v_conv = nn.Sequential(nn.Conv1d(in_channels + emb_dim * 2, V, 1), nn.ELU())
+        self.v_conv = nn.Sequential(nn.Conv1d(in_channels + emb_dim * 2, V, 1), nonlin)
 
         self.fc = nn.Sequential(nn.Conv1d(V, V, 1), nn.ReLU())
 
@@ -466,7 +466,9 @@ class PixelCNNProg(nn.Module):
 
         self.level_up = nn.ModuleList()
 
-        conv_rep = 1
+        nonlin = nn.LeakyReLU()
+
+        conv_rep = 3
 
         for i in range(self.levels):
 
@@ -475,21 +477,21 @@ class PixelCNNProg(nn.Module):
             gr = 1
             sep = True
 
-            level_in_cur = [CausalConv(in_channels, channels, kernels, see_center=False), nn.BatchNorm2d(channels), nn.ELU()]
+            level_in_cur = [CausalConv(in_channels, channels, kernels, see_center=False), nn.BatchNorm2d(channels), nonlin]
 
             for j in range(conv_rep):
-                level_in_cur.append(CausalConv(channels, channels, kernels, dilation=2, groups=gr, sep=sep))
+                level_in_cur.append(CausalConv(channels * (2 if (j == 0 and i > 0) else 1), channels, kernels, dilation=1 + j % 2, groups=gr, sep=sep))
                 level_in_cur.append(nn.BatchNorm2d(channels))
-                level_in_cur.append(nn.ELU())
+                level_in_cur.append(nonlin)
 
             self.level_in.append(nn.Sequential(*level_in_cur))
 
-            level_out_cur = [CausalConv(channels * (2 if i > 0 else 1), channels, kernels, groups=gr, sep=sep), nn.BatchNorm2d(channels), nn.ELU()]
+            level_out_cur = [CausalConv(channels, channels, kernels, groups=gr, sep=sep), nn.BatchNorm2d(channels), nonlin]
 
             for j in range(conv_rep):
-                level_out_cur.append(CausalConv(2 * channels, channels, kernels, dilation=2, groups=gr, sep=sep))
+                level_out_cur.append(CausalConv(2 * channels, channels, kernels, dilation=1 + j % 2, groups=gr, sep=sep))
                 level_out_cur.append(nn.BatchNorm2d(channels))
-                level_out_cur.append(nn.ELU())
+                level_out_cur.append(nonlin)
 
             self.level_out.append(nn.Sequential(*level_out_cur))
 
@@ -509,7 +511,7 @@ class PixelCNNProg(nn.Module):
             #self.level_latent.append(nn.Sequential(nn.Conv2d(channels, channels, 1), nn.ELU(), nn.Conv2d(channels, out_channels, 1))) #Tanh
             self.level_latent.append(nn.Sequential(nn.Conv2d(channels * 2, out_channels, 1), nn.Tanh())) #Tanh
 
-            self.level_final.append(nn.Sequential(nn.Conv2d(out_channels // 2, channels, 1), nn.ELU(), nn.Conv2d(channels, in_channels, 1), nn.Sigmoid()))
+            self.level_final.append(nn.Sequential(nn.Conv2d(out_channels // 2, channels, 1), nonlin, nn.Conv2d(channels, in_channels, 1), nn.Sigmoid()))
 
             if i < self.levels - 1:
                 self.level_up.append(nn.ConvTranspose2d(channels * 2, channels, 2, stride=2))
@@ -546,8 +548,8 @@ class PixelCNNProg(nn.Module):
             if i > self.total_attn // 2:
                 in0 *= 2
             self.layers_attn.append(nn.Sequential(#CausalConv(channels, channels, kernels),
-                                                  AttentionBlock(in0, K=channels, V=channels, side_len=self.side_len // (2 ** (self.levels - 1))),
-                                                  nn.BatchNorm2d(channels), nn.ELU()))
+                                                  AttentionBlock(in0, K=channels, V=channels, side_len=self.side_len // (2 ** (self.levels - 1)), nonlin=nonlin),
+                                                  nn.BatchNorm2d(channels), nonlin))
             #self.layers_attn.append(nn.Sequential(AttentionBlock(channels, K=channels, V=channels, side_len=self.side_len // 4), nn.BatchNorm2d(channels), nn.ELU()))
 
 
@@ -621,6 +623,10 @@ class PixelCNNProg(nn.Module):
                 if j % 3 == 2:
                     outer_past.append(x0)
 
+                if i > 0 and j == 2:
+                    prev = self.level_up[i - 1](outs[-1])
+                    x0 = torch.cat((x0, prev), dim=1)
+
 
             #x0 = self.level_in[i](x0)
 
@@ -642,9 +648,9 @@ class PixelCNNProg(nn.Module):
                         x0 = l(x0)
                     else:
                         x0 = l(x0)
-            else:
-                prev = self.level_up[i - 1](outs[-1])
-                x0 = torch.cat((x0, prev), dim=1)
+            #else:
+            #    prev = self.level_up[i - 1](outs[-1])
+            #    x0 = torch.cat((x0, prev), dim=1)
 
 
             for j, l in enumerate(self.level_out[i]):
