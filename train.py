@@ -67,7 +67,7 @@ class Trainer(object):
 
         for i in range(data[-1].shape[2]):
                 #print(data[0].shape)
-                out = self.model(data, level=level, var_mult=var_mult)
+                out = self.model.forward(data, level=level, var_mult=var_mult)
 
                 for j in range(len(out)):
                     if i < data[j].shape[2]:

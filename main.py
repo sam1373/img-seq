@@ -17,7 +17,7 @@ import numpy as np
 
 
 
-batch_size = 1024
+batch_size = 256 * 8
 
 sep = 8
 
@@ -40,7 +40,7 @@ custom_transform = transforms.Compose([transforms.ToTensor()])
 
 dataset = "CelebA"
 
-local = True
+local = False
 
 if dataset == "CelebA":
 
@@ -51,8 +51,8 @@ if dataset == "CelebA":
     txt_path = "/data/skriman2/CelebAligned/list_attr_celeba.txt"
     img_dir = "/data/skriman2/CelebAligned/"
 
-  train_dataset = CelebaDataset(txt_path='/home/samuel/Data/CelebAligned/list_attr_celeba.txt',
-                                img_dir='/home/samuel/Data/CelebAligned/',
+  train_dataset = CelebaDataset(txt_path=txt_path,
+                                img_dir=img_dir,
                                 transform=custom_transform, in_size=model.module.side_len)
 
   trainloader = DataLoader(dataset=train_dataset,
@@ -111,12 +111,12 @@ sample_path = "sample"
 if not local:
   sample_path = "/data/skriman2/sample"
 
-trainer = Trainer(model, sample_path=sample_path)
+trainer = Trainer(model, sample_path=sample_path, checkpoints='model_celeb.cp')
 
 trainer.model.eval()
 
-trainer.recon_frames(0, sample, level=3)
-trainer.sample_frames(0, level=3)
+#trainer.recon_frames(0, sample, level=3)
+#trainer.sample_frames(0, level=3)
 
-trainer.train_model(trainloader, test_every_x=5, epochs=1000, epochs_per_level=100)
+trainer.train_model(trainloader, test_every_x=99999, epochs=1000, epochs_per_level=100)
 
