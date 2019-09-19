@@ -17,7 +17,7 @@ import numpy as np
 
 
 
-batch_size = 128 * 7
+batch_size = 1024
 
 sep = 8
 
@@ -40,10 +40,16 @@ custom_transform = transforms.Compose([transforms.ToTensor()])
 
 dataset = "CelebA"
 
-local = False
-
+local = True
 
 if dataset == "CelebA":
+
+  txt_path = "/home/samuel/Data/CelebAligned/list_attr_celeba.txt"
+  img_dir = "/home/samuel/Data/CelebAligned/"
+
+  if local == False:
+    txt_path = "/data/skriman2/CelebAligned/list_attr_celeba.txt"
+    img_dir = "/data/skriman2/CelebAligned/"
 
   train_dataset = CelebaDataset(txt_path='/home/samuel/Data/CelebAligned/list_attr_celeba.txt',
                                 img_dir='/home/samuel/Data/CelebAligned/',
