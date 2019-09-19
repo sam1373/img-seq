@@ -272,7 +272,7 @@ class Trainer(object):
                     if (i + 1) % 10 == 0:
                         print()
                         print("Step", i + 1)
-                        print("logvar:", logvar.item())
+                        print("logvar:", logvar.sum())
 
                     for j in range(len(out)):
                         #loss_j = discretized_mix_logistic_loss(data[j], out[j])
@@ -311,7 +311,7 @@ class Trainer(object):
 
                 loss = discretized_mix_logistic_loss(data_3, out)
 
-               
+               loss = loss.sum()
 
                loss.backward()
 

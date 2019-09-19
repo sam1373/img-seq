@@ -17,13 +17,13 @@ import numpy as np
 
 
 
-batch_size = 128
+batch_size = 128 * 7
 
 sep = 8
 
 #model = ImgAttendModel(side_len=16, kernels=3, channels=128, blocks_rep=4, conv_rep=4)
 #model = PixelCNN(side_len=16, kernels=5, in_channels=3, channels=128, out_channels=200)
-model = PixelCNNProg(side_len=28, kernels=5, in_channels=3, channels=128, out_channels=200, total_attn=9)
+model = PixelCNNProg(side_len=32, kernels=9, in_channels=3, channels=128, out_channels=200, total_attn=9)
 model = nn.DataParallel(model)
 
 total = 0
@@ -38,12 +38,13 @@ rescaling = lambda x : (x - .5) * 2.
 
 custom_transform = transforms.Compose([transforms.ToTensor()])
 
-dataset = "MNIST"
+dataset = "CelebA"
 
-local = True
+local = False
 
 
 if dataset == "CelebA":
+
   train_dataset = CelebaDataset(txt_path='/home/samuel/Data/CelebAligned/list_attr_celeba.txt',
                                 img_dir='/home/samuel/Data/CelebAligned/',
                                 transform=custom_transform, in_size=model.module.side_len)
@@ -111,5 +112,5 @@ trainer.model.eval()
 trainer.recon_frames(0, sample, level=3)
 trainer.sample_frames(0, level=3)
 
-trainer.train_model(trainloader, test_every_x=5, epochs=300, epochs_per_level=20)
+trainer.train_model(trainloader, test_every_x=5, epochs=1000, epochs_per_level=100)
 
