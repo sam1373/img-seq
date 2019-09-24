@@ -9,6 +9,7 @@ from model import *
 from tqdm import *
 
 from loss import *
+from optimizers import *
 
 import pandas as pd
 
@@ -33,7 +34,8 @@ class Trainer(object):
 
         self.start_epoch = 0
 
-        self.optimizer = torch.optim.Adam(self.model.parameters())
+        self.optimizer = Novograd(self.model.parameters())
+        #self.optimizer = torch.optim.Adam(self.model.parameters())
         #self.optimizer = torch.optim.SGD(self.model.parameters(), lr=0.001, momentum=0.9, nesterov=True)
         self.scheduler = StepLR(self.optimizer, step_size=1, gamma=0.98)
 
@@ -41,7 +43,7 @@ class Trainer(object):
 
 
     def sample(self, bs, level, var_mult):
-        self.model.train(False)
+        #self.model.train(False)
 
         print(level)
         #TODO:actually implement this for multiple level generation
@@ -71,9 +73,9 @@ class Trainer(object):
 
                 for j in range(len(out)):
                     if i < data[j].shape[2]:
-                        cur_out = out[j].view(data[j].shape[0], out[j].shape[1], data[j].shape[2])[:, :, i]
-                        #sample = sample_from_logistic_mix(out[j])
-                        #cur_out = sample.view(data[j].shape)[:, :, i]
+                        #cur_out = out[j].view(data[j].shape[0], out[j].shape[1], data[j].shape[2])[:, :, i]
+                        sample = sample_from_logistic_mix(out[j])
+                        cur_out = sample.view(data[j].shape)[:, :, i]
                         
                         data[j][:, :, i] = cur_out
 
@@ -118,7 +120,7 @@ class Trainer(object):
             side_len = self.model.module.side_len // (2 ** (level - 1))
             gen = gen[-1].view(-1, self.model.module.in_channels, side_len, side_len)
 
-            #gen = gen / 2. + 0.5
+            gen = gen / 2. + 0.5
 
             print(gen.min(), gen.max())
 
@@ -130,6 +132,8 @@ class Trainer(object):
             #torchvision.utils.save_image(x_gen,'%s/epoch%d_same.png' % (self.sample_path,epoch), nrow=10)
 
     def recon_frames(self, epoch, x, level):
+
+        #self.model.train()
 
         with torch.no_grad():
             side_len = self.model.module.side_len // (2 ** (level - 1))
@@ -145,9 +149,24 @@ class Trainer(object):
 
             data = data[::-1]
 
-            recon, _ = self.model(data, level=level, training=True)
-            recon = recon[-1].view(-1, self.model.module.in_channels, side_len, side_len)
+
+
+            recon, _ = self.model.forward(data, level=level, training=True)
+            recon = recon[-1]
+            recon = sample_from_logistic_mix(recon)
+
+            """
+            for i in range(len(data)):
+               plt.imshow(data[i][0].permute(1, 2, 0).cpu())
+               plt.show()
+
+               plt.imshow(recon[i][0].permute(1, 2, 0).detach().cpu())
+               plt.show()
+            """
+
+            recon = recon.view(-1, self.model.module.in_channels, side_len, side_len)
             imgs_with_recon = torch.cat((data[-1], recon), dim=0)
+            imgs_with_recon = imgs_with_recon / 2. + 0.5
             torchvision.utils.save_image(imgs_with_recon, '%s/recon_epoch%d.png' % (self.sample_path,epoch), nrow=10)
     
     def save_checkpoint(self,epoch):
@@ -177,10 +196,12 @@ class Trainer(object):
 
     def train_model(self, trainloader, epochs=100, test_every_x=4, epochs_per_level=50):
 
-        self.model.train()
+        
 
         #avgDiff = 0
         for epoch in range(self.start_epoch, epochs):
+
+           self.model.train()
 
            current_level = self.model.module.levels - epoch // epochs_per_level
 
@@ -199,7 +220,7 @@ class Trainer(object):
            #lastDiff = avgDiff
            avgDiff = 0
 
-           loss_type = "val"
+           loss_type = "levels"
 
            mse_loss = nn.MSELoss()
 
@@ -215,11 +236,13 @@ class Trainer(object):
                 bs = data.shape[0]
                 data *= torch.rand([bs, 3, 1, 1]).cuda()
 
+                #data[:, :, 10:20, 10:20] = 1.
+
                 #plt.imshow(data[0].permute(1, 2, 0).cpu())
                 #plt.show()
                 #input()
 
-               #data = (data - 0.5) * 2
+               data = (data - 0.5) * 2
 
                data = Variable(data)
 
@@ -245,16 +268,19 @@ class Trainer(object):
                #data_3 = F.avg_pool2d(data_2, 2)
 
                """
-               plt.imshow(data[-1][0].permute(1, 2, 0).cpu())
-               plt.show()
+               for i in range(len(data)):
+                   plt.imshow(data[i][0].permute(1, 2, 0).cpu())
+                   plt.show()
 
-               plt.imshow(out[-1][0].permute(1, 2, 0).detach().cpu())
-               plt.show()
-               """
+                   plt.imshow(out[i][0].permute(1, 2, 0).detach().cpu())
+                   plt.show()
+               """        
                
                
 
-               if loss_type == "val":
+               if loss_type == "levels":
+
+
 
                     #print(logvar)
                     #print(z_logvar)
@@ -267,7 +293,7 @@ class Trainer(object):
 
                     loss = 0
 
-                    loss += -logvar * 0.0001#0.0002
+                    #loss += -logvar * 0.0001#0.0002
 
                     if (i + 1) % 10 == 0:
                         print()
@@ -275,14 +301,14 @@ class Trainer(object):
                         print("logvar:", logvar.sum())
 
                     for j in range(len(out)):
-                        #loss_j = discretized_mix_logistic_loss(data[j], out[j])
-                        loss_j = mse_loss(out[j], data[j])
+                        loss_j = discretized_mix_logistic_loss(data[j], out[j])
+                        #loss_j = mse_loss(out[j], data[j])
 
                         if (i + 1) % 10 == 0:
                             print("loss res", j, ":", loss_j)
 
-                        if j == len(out) - 1:
-                            loss_j *= (len(out))
+                        #if j == len(out) - 1:
+                        #    loss_j *= (len(out))
 
                         loss = loss + loss_j
 
@@ -349,6 +375,8 @@ class Trainer(object):
                sample = sample.repeat(1, 3, 1, 1)
                bs = sample.shape[0]
                sample *= torch.rand([bs, 3, 1, 1]).cuda()
+
+           sample = (sample - 0.5) * 2
 
            if (epoch + 1) % test_every_x == 0:
             self.recon_frames(epoch+1, sample, level=current_level)

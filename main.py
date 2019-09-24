@@ -17,13 +17,13 @@ import numpy as np
 
 
 
-batch_size = 256 * 8
+batch_size = 128
 
 sep = 8
 
 #model = ImgAttendModel(side_len=16, kernels=3, channels=128, blocks_rep=4, conv_rep=4)
 #model = PixelCNN(side_len=16, kernels=5, in_channels=3, channels=128, out_channels=200)
-model = PixelCNNProg(side_len=32, kernels=9, in_channels=3, channels=128, out_channels=200, total_attn=9)
+model = PixelCNNProg(side_len=28, kernels=9, in_channels=3, channels=128, out_channels=100, total_attn=9, levels=2)
 model = nn.DataParallel(model)
 
 total = 0
@@ -38,9 +38,9 @@ rescaling = lambda x : (x - .5) * 2.
 
 custom_transform = transforms.Compose([transforms.ToTensor()])
 
-dataset = "CelebA"
+dataset = "MNIST"
 
-local = False
+local = True
 
 if dataset == "CelebA":
 
@@ -103,7 +103,7 @@ if sample.shape[1] == 1:
   bs = sample.shape[0]
   sample *= torch.rand([bs, 3, 1, 1]).cuda()
 
-
+sample = (sample - 0.5) * 2
 
 
 sample_path = "sample"
@@ -111,12 +111,12 @@ sample_path = "sample"
 if not local:
   sample_path = "/data/skriman2/sample"
 
-trainer = Trainer(model, sample_path=sample_path, checkpoints='model_celeb.cp')
+trainer = Trainer(model, sample_path=sample_path, checkpoints='model.cp')
 
 trainer.model.eval()
 
-#trainer.recon_frames(0, sample, level=3)
-#trainer.sample_frames(0, level=3)
+trainer.recon_frames(0, sample, level=model.module.levels)
+trainer.sample_frames(0, level=model.module.levels)
 
-trainer.train_model(trainloader, test_every_x=99999, epochs=1000, epochs_per_level=100)
+trainer.train_model(trainloader, test_every_x=5, epochs=1000, epochs_per_level=500)
 

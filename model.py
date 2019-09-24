@@ -65,13 +65,23 @@ class CausalConv(nn.Conv2d):
 
         self.mask = torch.Tensor(pre_mask)
 
+        #print(self.mask[0][0])
+        #input()
+
         if sep:
             self.conv1x1 = nn.Conv2d(in_channels, out_channels, 1, groups=groups)
 
         self.sep = sep
 
     def forward(self, x):
+        #torch.set_printoptions(threshold=5000, precision=2)
+        #print(self.weight.data.shape)
+        #print(self.weight.data[0])
+        #input()
         self.weight.data *= self.mask
+        #print(self.weight.data.shape)
+        #print(self.weight.data[0])
+        #input()
         x = super(CausalConv, self).forward(x)
         if self.sep:
             x = self.conv1x1(x)
@@ -137,6 +147,9 @@ class AttentionBlock(nn.Module):
 
         self.side_len = side_len
 
+        self.K = K
+        self.V = V
+
         self.emb_dim = emb_dim
         #self.bg = bg
 
@@ -151,7 +164,7 @@ class AttentionBlock(nn.Module):
 
         self.v_conv = nn.Sequential(nn.Conv1d(in_channels + emb_dim * 2, V, 1), nonlin)
 
-        self.fc = nn.Sequential(nn.Conv1d(V, V, 1), nn.ReLU())
+        self.fc = nn.Sequential(nn.Conv1d(V, V, 1), nonlin)
 
         self.out_channels = V
 
@@ -160,9 +173,6 @@ class AttentionBlock(nn.Module):
         orig_shape = x.shape
 
         pos_emb = get_pos_embeddings(self.side_len, self.emb_dim).repeat(orig_shape[0], 1, 1, 1)
-
-        #print(pos_emb.shape)
-        #input()
 
         x0 = torch.cat((x, pos_emb), dim=1)
 
@@ -174,32 +184,13 @@ class AttentionBlock(nn.Module):
 
         v = self.v_conv(x0)
 
-        #print(q.shape, k.shape)
+        attn = torch.bmm(q.transpose(-2, -1), k) / (self.K ** 0.5)
 
-        attn = torch.bmm(q.transpose(-2, -1), k)
-
-        #print(attn.shape)  
-        #print(attn[0], self.mask[0])
-        #print(attn[0])
         mask = self.mask.to(attn.device)
-
-        #print(mask[0])
 
         attn_masked = attn * mask + (1 - mask) * (-10000.)
 
-        #print(attn_masked[0])
-
         attn_masked = nn.functional.softmax(attn_masked, dim=-1) * mask
-
-        #print(attn_masked[0])
-        #input()
-
-        #attn_bg = attn - attn_masked
-
-        #out = torch.bmm(v, attn_masked) + torch.bmm(bh, attn_bg)
-
-        #print(attn.shape, causal_val.shape)
-        #print(attn_masked.shape, v.shape)
 
         #use attn_masked
         out1 = torch.bmm(attn_masked, v.transpose(-2, -1)).transpose(-2, -1)
@@ -208,9 +199,184 @@ class AttentionBlock(nn.Module):
 
         out2 = out1.view(orig_shape[0], self.out_channels, orig_shape[2], orig_shape[3])
 
-        #out = x + out
+        return out2
+
+class AttentionBlockConv(nn.Module):
+
+    def __init__(self, in_channels, K, V, side_len, nonlin, bg=None, emb_dim=16, conv_side=2):
+
+        super(AttentionBlockConv, self).__init__()
+
+
+        self.side_len = side_len
+        self.conv_side = conv_side
+
+        self.K = K
+        self.V = V
+
+        self.emb_dim = emb_dim
+
+        self.mask = get_causal_mask((side_len // conv_side) ** 2)
+
+        self.q_conv = nn.Sequential(nn.Conv2d(in_channels + emb_dim * 2, K, conv_side, stride=conv_side, padding=conv_side - 1), nonlin)
+
+        self.k_conv = nn.Sequential(nn.Conv2d(in_channels + emb_dim * 2, K, conv_side, stride=conv_side, padding=conv_side - 1), nonlin)
+
+        self.v_conv = nn.Sequential(nn.Conv2d(in_channels + emb_dim * 2, V, conv_side, stride=conv_side, padding=conv_side - 1), nonlin)
+
+        self.fc = nn.Sequential(nn.Conv1d(V, V, 1), nonlin)
+
+        self.upsample = nn.ConvTranspose2d(V, V, 2, stride=2)
+
+        self.out_channels = V
+
+    def forward(self, x):
+
+        orig_shape = x.shape
+
+
+        pos_emb = get_pos_embeddings(self.side_len, self.emb_dim).repeat(orig_shape[0], 1, 1, 1)
+
+        x0 = torch.cat((x, pos_emb), dim=1)
+
+        #print(x0.shape)
+        #x0 = x0.view(orig_shape[0], orig_shape[1] + self.emb_dim * 2, -1)
+        #print(self.q_conv(x0).shape)
+
+        q = self.q_conv(x0)[:, :, :-(self.conv_side - 1), :-(self.conv_side - 1)].contiguous().view(orig_shape[0], self.K, -1)
+
+        #print(q.shape)
+
+        k = self.k_conv(x0)[:, :, :-(self.conv_side - 1), :-(self.conv_side - 1)].contiguous().view(orig_shape[0], self.K, -1)
+
+        v = self.v_conv(x0)[:, :, :-(self.conv_side - 1), :-(self.conv_side - 1)].contiguous().view(orig_shape[0], self.V, -1)
+
+        attn = torch.bmm(q.transpose(-2, -1), k) / (self.K ** 0.5)
+
+        mask = self.mask.to(attn.device)
+
+        attn_masked = attn * mask + (1 - mask) * (-10000.)
+
+        attn_masked = nn.functional.softmax(attn_masked, dim=-1) * mask
+
+        #use attn_masked
+        out1 = torch.bmm(attn_masked, v.transpose(-2, -1)).transpose(-2, -1)
+
+        out2 = out1 + self.fc(out1)
+
+        out2 = out1.view(orig_shape[0], self.out_channels, orig_shape[2] // self.conv_side, orig_shape[3] // self.conv_side)
+
+        out2 = self.upsample(out2)
 
         return out2
+
+class AttentionBlockPersistent(nn.Module):
+
+    def __init__(self, in_channels, K, V, side_len, nonlin, bg=None, emb_dim=16):
+
+        super(AttentionBlockPersistent, self).__init__()
+
+
+        self.side_len = side_len
+
+        self.K = K
+        self.V = V
+
+        self.emb_dim = emb_dim
+        #self.bg = bg
+
+        #if not self.bg:
+        #    self.bg = torch.zeros([in_channels, canvas_size])
+
+        self.mask = get_causal_mask(side_len ** 2)
+
+        self.q = nn.Sequential(nn.Conv1d(in_channels + emb_dim * 2, K, 1), nonlin)
+
+        self.f_k = nn.Sequential(nn.Conv1d(in_channels + K + emb_dim * 2, K, 1), nn.Sigmoid())
+
+        self.i_k = nn.Sequential(nn.Conv1d(in_channels + K + emb_dim * 2, K, 1), nn.Sigmoid())
+
+        self.o_k = nn.Sequential(nn.Conv1d(in_channels + K + emb_dim * 2, K, 1), nn.Sigmoid())
+
+        self.c_k = nn.Sequential(nn.Conv1d(in_channels + K + emb_dim * 2, K, 1), nonlin)
+
+        self.f_v = nn.Sequential(nn.Conv1d(in_channels + V + emb_dim * 2, V, 1), nn.Sigmoid())
+
+        self.i_v = nn.Sequential(nn.Conv1d(in_channels + V + emb_dim * 2, V, 1), nn.Sigmoid())
+
+        self.o_v = nn.Sequential(nn.Conv1d(in_channels + V + emb_dim * 2, V, 1), nn.Sigmoid())
+
+        self.c_v = nn.Sequential(nn.Conv1d(in_channels + V + emb_dim * 2, V, 1), nonlin)
+
+        self.fc = nn.Sequential(nn.Conv1d(V, V, 1), nonlin)
+
+        self.out_channels = V
+
+    def forward(self, x, k, v):
+
+        #x - current propogated inputs
+        #k, v - persistent dictionary of keys and values
+        #f_k = W_f(x, k) sigm
+        #i_k = W_i(x, k) sigm
+        #o_k = W_o(x, k) sigm
+        #c_k = W_c(x, k)
+        #k_new = o * (f * k + i * c)
+        #same for v
+        #then
+        #q = W_q(x)
+        #x_new = Attn(q, k_new, v_new)
+        #return x_new, k_new, v_new
+
+        orig_shape = x.shape
+
+        pos_emb = get_pos_embeddings(self.side_len, self.emb_dim).repeat(orig_shape[0], 1, 1, 1)
+
+        x0 = torch.cat((x, pos_emb), dim=1)
+
+        x0 = x0.view(orig_shape[0], orig_shape[1] + self.emb_dim * 2, -1)
+
+        x0_with_k = torch.cat((x0, k), dim=1)#.view(orig_shape[0], x0.shape[1] + k.shape[1], -1)
+
+        x0_with_v = torch.cat((x0, v), dim=1)#.view(orig_shape[0], x0.shape[1] + v.shape[1], -1)
+
+        f_k = self.f_k(x0_with_k)
+
+        i_k = self.i_k(x0_with_k)
+
+        o_k = self.o_k(x0_with_k)
+
+        c_k = self.c_k(x0_with_k)
+
+        k_new = o_k * (f_k * k + i_k * c_k)
+
+        f_v = self.f_v(x0_with_v)
+
+        i_v = self.i_v(x0_with_v)
+
+        o_v = self.o_v(x0_with_v)
+
+        c_v = self.c_v(x0_with_v)
+
+        v_new = o_v * (f_v * v + i_v * c_v)
+
+        q = self.q(x0)
+
+        attn = torch.bmm(q.transpose(-2, -1), k) / (self.K ** 0.5)
+
+        mask = self.mask.to(attn.device)
+
+        attn_masked = attn * mask + (1 - mask) * (-10000.)
+
+        attn_masked = nn.functional.softmax(attn_masked, dim=-1) * mask
+
+        #use attn_masked
+        out1 = torch.bmm(attn_masked, v.transpose(-2, -1)).transpose(-2, -1)
+
+        out2 = out1 + self.fc(out1)
+
+        out2 = out1.view(orig_shape[0], self.out_channels, orig_shape[2], orig_shape[3])
+
+        return out2, k_new, v_new
 
 
 class SnailBlock(nn.Module):
@@ -468,7 +634,7 @@ class PixelCNNProg(nn.Module):
 
         nonlin = nn.LeakyReLU()
 
-        conv_rep = 3
+        conv_rep = 3 + (3 - levels)
 
         for i in range(self.levels):
 
@@ -480,7 +646,10 @@ class PixelCNNProg(nn.Module):
             level_in_cur = [CausalConv(in_channels, channels, kernels, see_center=False), nn.BatchNorm2d(channels), nonlin]
 
             for j in range(conv_rep):
-                level_in_cur.append(CausalConv(channels * (2 if (j == 0 and i > 0) else 1), channels, kernels, dilation=1 + j % 2, groups=gr, sep=sep))
+                if j % 2 == 1:
+                    level_in_cur.append(AttentionBlockConv(channels * (2 if (j == 0 and i > 0) else 1), channels, channels, self.side_len // (2 ** (self.levels - 1 - i)), nonlin))
+                else:
+                    level_in_cur.append(CausalConv(channels * (2 if (j == 0 and i > 0) else 1), channels, kernels, dilation=1, groups=gr, sep=sep))
                 level_in_cur.append(nn.BatchNorm2d(channels))
                 level_in_cur.append(nonlin)
 
@@ -508,8 +677,8 @@ class PixelCNNProg(nn.Module):
             #    self.level_out.append(nn.Sequential(CausalConv(channels, channels, kernels), nn.BatchNorm2d(channels), nn.ELU(),
             #                             CausalConv(channels, channels, kernels), nn.BatchNorm2d(channels), nn.ELU()))
 
-            #self.level_latent.append(nn.Sequential(nn.Conv2d(channels, channels, 1), nn.ELU(), nn.Conv2d(channels, out_channels, 1))) #Tanh
-            self.level_latent.append(nn.Sequential(nn.Conv2d(channels * 2, out_channels, 1), nn.Tanh())) #Tanh
+            self.level_latent.append(nn.Sequential(nn.Conv2d(channels * 2, channels, 1), nn.ELU(), nn.Conv2d(channels, out_channels, 1))) #Tanh
+            #self.level_latent.append(nn.Sequential(nn.Conv2d(channels * 2, out_channels, 1), nn.Tanh())) #Tanh
 
             self.level_final.append(nn.Sequential(nn.Conv2d(out_channels // 2, channels, 1), nonlin, nn.Conv2d(channels, in_channels, 1), nn.Sigmoid()))
 
@@ -673,9 +842,9 @@ class PixelCNNProg(nn.Module):
             x0 = self.level_latent[i](x0)
 
           
-            #pix.append(x0)
+            pix.append(x0)
 
-            
+            """
             mean = x0[:, :self.out_channels // 2]
             logvar = x0[:, self.out_channels // 2:] * 3
 
@@ -691,7 +860,7 @@ class PixelCNNProg(nn.Module):
             out = self.level_final[i](out)
 
             pix.append(out)
-
+            """
             
 
             
@@ -780,7 +949,7 @@ class PixelCNNProg(nn.Module):
                 pix.append(self.final_2(out))
 
         """
-        #lv_mean = torch.Tensor([0]).cuda()
+        lv_mean = torch.Tensor([0]).cuda()
 
         if training:
             return pix, lv_mean
@@ -790,43 +959,42 @@ class PixelCNNProg(nn.Module):
 
 if __name__ == '__main__':
 
-    pos_enc_table = get_pos_enc_table(7)
-    print(pos_enc_table)
-    print(pos_enc_table.shape)
-    input()
+    side_len = 14
+    K = 16
+    V = 64
 
-    inp = torch.randn((32, 3, 16, 16)).cuda()
+    test = 3
 
-    x = torch.randn((32, 64, 16, 16)).cuda()
+    if test == 1:
 
-    #out = conv(x)
+        inp = torch.randn((32, 3, side_len, side_len)).cuda()
 
-    #print(out.shape)
+        a = AttentionBlock(3, K, V, side_len, nn.ReLU()).cuda()
 
-    #attn = AttentionBlock(64, 16, 64, 32 * 32).cuda()
+        out = a(inp)
 
-    #x = x.view(32, 64, 32 * 32)
+        print(out.shape)
 
-    #out = attn(x)
+    if test == 2:
 
-    #print(out.shape)
+        inp = torch.randn((32, 3, side_len, side_len)).cuda()
 
-    model = ImgAttendModel(side_len=16)
+        a = AttentionBlockConv(3, K, V, side_len, nn.ReLU()).cuda()
 
-    total = 0
-    for p in model.parameters():
-      total += np.prod(p.shape)
-      print(p.shape, np.prod(p.shape))
-      
-    print(total)
+        out = a(inp)
 
-    for i in range(16 * 16):
-        out = model(inp)
-        print(i + 1, "done")
+        print(out.shape)
 
-    #print(out.shape)
+    elif test == 3:
 
-    pos = get_pos_embeddings(16)
+        inp = torch.randn((32, 3, side_len, side_len)).cuda()
 
-    print(pos)
-    print(pos.shape)
+        k = torch.randn((32, K, side_len * side_len)).cuda()
+        v = torch.randn((32, V, side_len * side_len)).cuda()
+
+
+        a = AttentionBlockPersistent(3, K, V, side_len, nn.ReLU()).cuda()
+
+        out, k_new, v_new = a(inp, k, v)
+
+        print(out.shape, k_new.shape, v_new.shape)

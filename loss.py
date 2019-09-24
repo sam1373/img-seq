@@ -175,15 +175,63 @@ def discretized_mix_logistic_loss(x, l):
     return -torch.sum(torch.logsumexp(log_probs, dim=-1))
 
 """
-
 def to_one_hot(y, n_dims=None):
-    """ Take integer y (tensor or variable) with n dims and convert it to 1-hot representation with n+1 dims. """
+    # Take integer y (tensor or variable) with n dims and convert it to 1-hot representation with n+1 dims.
     y_tensor = y.data if isinstance(y, Variable) else y
     y_tensor = y_tensor.type(torch.LongTensor).view(-1, 1)
     n_dims = n_dims if n_dims is not None else int(torch.max(y_tensor)) + 1
     y_one_hot = torch.zeros(y_tensor.size()[0], n_dims).scatter_(1, y_tensor, 1).cuda()
     y_one_hot = y_one_hot.view(*y.shape, -1)
     return Variable(y_one_hot) if isinstance(y, Variable) else y_one_hot
+    
+def sample_from_logistic_mix(l):
+
+    # Pytorch ordering
+    l = l.permute(0, 2, 3, 1)
+    ls = [int(y) for y in l.size()]
+    xs = ls[:-1] + [3]
+
+    nr_mix = int(ls[-1] / 10)
+
+    # unpack parameters
+    logit_probs = l[:, :, :, :nr_mix]
+    l = l[:, :, :, nr_mix:].contiguous().view(xs + [nr_mix * 3])
+    # sample mixture indicator from softmax
+    temp = torch.FloatTensor(logit_probs.size())
+    if l.is_cuda : temp = temp.cuda()
+    temp.uniform_(1e-5, 1. - 1e-5)
+    temp = logit_probs.data - torch.log(- torch.log(temp))
+    _, argmax = temp.max(dim=3)
+   
+    one_hot = to_one_hot(argmax, nr_mix)
+    sel = one_hot.view(xs[:-1] + [1, nr_mix])
+    # select logistic parameters
+    means = torch.sum(l[:, :, :, :, :nr_mix] * sel, dim=4) 
+    log_scales = torch.clamp(torch.sum(
+        l[:, :, :, :, nr_mix:2 * nr_mix] * sel, dim=4), min=-7.)
+    coeffs = torch.sum(F.tanh(
+        l[:, :, :, :, 2 * nr_mix:3 * nr_mix]) * sel, dim=4)
+    # sample from logistic & clip to interval
+    # we don't actually round to the nearest 8bit value when sampling
+    u = torch.FloatTensor(means.size())
+    if l.is_cuda : u = u.cuda()
+    u.uniform_(1e-5, 1. - 1e-5)
+    u = Variable(u)
+    x = means + torch.exp(log_scales) * (torch.log(u) - torch.log(1. - u))
+    x0 = torch.clamp(torch.clamp(x[:, :, :, 0], min=-1.), max=1.)
+    x1 = torch.clamp(torch.clamp(
+       x[:, :, :, 1] + coeffs[:, :, :, 0] * x0, min=-1.), max=1.)
+    x2 = torch.clamp(torch.clamp(
+       x[:, :, :, 2] + coeffs[:, :, :, 1] * x0 + coeffs[:, :, :, 2] * x1, min=-1.), max=1.)
+
+    out = torch.cat([x0.view(xs[:-1] + [1]), x1.view(xs[:-1] + [1]), x2.view(xs[:-1] + [1])], dim=3)
+    # put back in Pytorch ordering
+    out = out.permute(0, 3, 1, 2)
+    return out
+
+"""
+
+
 
 def sample_from_logistic_mix(l):
     #gets [bs, mix_num * 10, side, side]
@@ -225,14 +273,14 @@ def sample_from_logistic_mix(l):
 
     return out.permute(0, 3, 1, 2)
 
-
+"""
 
 def quant(img):
   #[bs, 3, side_len, side_len]
 
   img = img / 0.125
 
-  
+
 
 
 if __name__ == '__main__':
