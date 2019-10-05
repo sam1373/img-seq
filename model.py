@@ -5,7 +5,7 @@ from torch.autograd import Variable
 import numpy as np
 import torch.optim as optim
 
-#from loss import *
+from loss import *
 
 import functools
 
@@ -41,12 +41,15 @@ def get_pos_embeddings(side_len, emb_dim=16):
     return torch.cat((x, y), dim=1).cuda()
 
 
+class Swish(nn.Module):
 
-#class MyDataParallel(nn.DataParallel):
-#    def __getattr__(self, name):
-#        return getattr(self.module, name)
+    def __init__(self):
+        super(Swish, self).__init__()
 
+        self.sig = nn.Sigmoid()
 
+    def forward(self, x):
+        return x * self.sig(x)
 #causal conv
 class CausalConv(nn.Conv2d):
     def __init__(self, in_channels, out_channels, kernels, see_center=True, dilation=1, stride=1, groups=1, sep=False):
@@ -140,7 +143,7 @@ class MultiDilConvBlock(nn.Module):
 #attention block
 class AttentionBlock(nn.Module):
 
-    def __init__(self, in_channels, K, V, side_len, nonlin, bg=None, emb_dim=16):
+    def __init__(self, in_channels, K, V, side_len, nonlin, bg=None, emb_dim=16, heads=1):
 
         super(AttentionBlock, self).__init__()
 
@@ -262,11 +265,9 @@ class AttentionBlockConv(nn.Module):
         #use attn_masked
         out1 = torch.bmm(attn_masked, v.transpose(-2, -1)).transpose(-2, -1)
 
-        out2 = out1 + self.fc(out1)
-
         out2 = out1.view(orig_shape[0], self.out_channels, orig_shape[2] // self.conv_side, orig_shape[3] // self.conv_side)
 
-        out2 = self.upsample(out2)
+        out2 = x[:, :self.V] + self.upsample(out2)
 
         return out2
 
@@ -294,17 +295,17 @@ class AttentionBlockPersistent(nn.Module):
 
         self.f_k = nn.Sequential(nn.Conv1d(in_channels + K + emb_dim * 2, K, 1), nn.Sigmoid())
 
-        self.i_k = nn.Sequential(nn.Conv1d(in_channels + K + emb_dim * 2, K, 1), nn.Sigmoid())
+        #self.i_k = nn.Sequential(nn.Conv1d(in_channels + K + emb_dim * 2, K, 1), nn.Sigmoid())
 
-        self.o_k = nn.Sequential(nn.Conv1d(in_channels + K + emb_dim * 2, K, 1), nn.Sigmoid())
+        #self.o_k = nn.Sequential(nn.Conv1d(in_channels + K + emb_dim * 2, K, 1), nn.Sigmoid())
 
         self.c_k = nn.Sequential(nn.Conv1d(in_channels + K + emb_dim * 2, K, 1), nonlin)
 
         self.f_v = nn.Sequential(nn.Conv1d(in_channels + V + emb_dim * 2, V, 1), nn.Sigmoid())
 
-        self.i_v = nn.Sequential(nn.Conv1d(in_channels + V + emb_dim * 2, V, 1), nn.Sigmoid())
+        #self.i_v = nn.Sequential(nn.Conv1d(in_channels + V + emb_dim * 2, V, 1), nn.Sigmoid())
 
-        self.o_v = nn.Sequential(nn.Conv1d(in_channels + V + emb_dim * 2, V, 1), nn.Sigmoid())
+        #self.o_v = nn.Sequential(nn.Conv1d(in_channels + V + emb_dim * 2, V, 1), nn.Sigmoid())
 
         self.c_v = nn.Sequential(nn.Conv1d(in_channels + V + emb_dim * 2, V, 1), nonlin)
 
@@ -341,23 +342,26 @@ class AttentionBlockPersistent(nn.Module):
 
         f_k = self.f_k(x0_with_k)
 
-        i_k = self.i_k(x0_with_k)
+        #i_k = self.i_k(x0_with_k)
 
-        o_k = self.o_k(x0_with_k)
+        #o_k = self.o_k(x0_with_k)
 
         c_k = self.c_k(x0_with_k)
 
-        k_new = o_k * (f_k * k + i_k * c_k)
+        #k_new = o_k * (f_k * k + i_k * c_k)
+        k_new = f_k * k + c_k
 
         f_v = self.f_v(x0_with_v)
 
-        i_v = self.i_v(x0_with_v)
+        #i_v = self.i_v(x0_with_v)
 
-        o_v = self.o_v(x0_with_v)
+        #o_v = self.o_v(x0_with_v)
 
         c_v = self.c_v(x0_with_v)
 
-        v_new = o_v * (f_v * v + i_v * c_v)
+        v_new = f_v * v + c_v
+
+        #v_new = o_v * (f_v * v + i_v * c_v)
 
         q = self.q(x0)
 
@@ -534,7 +538,7 @@ class ImgAttendModel(nn.DataParallel):
 
 class PixelCNN(nn.Module):
 
-    def __init__(self, side_len=64, in_channels=3, channels=64, out_channels=100, total_convs=8, kernels=5, z_dim=32):
+    def __init__(self, side_len=64, in_channels=3, channels=64, out_channels=100, total_convs=8, kernels=5, use_z=True, z_dim=16, nonlin=nn.LeakyReLU()):
 
         super(PixelCNN, self).__init__()
 
@@ -543,33 +547,88 @@ class PixelCNN(nn.Module):
         self.side_len = side_len
         self.total_convs = total_convs
         self.out_channels = out_channels
+        self.z_dim = z_dim
 
+        #print(channels * side_len * side_len // (2**6))
 
-        self.in_l = nn.Sequential(CausalConv(in_channels, channels, kernels, see_center=False), nn.BatchNorm2d(channels), nn.ELU())
+        self.use_z = use_z
+
+        if use_z == False:
+            self.z_dim = 0
+
+        if use_z:
+
+            self.z_net = nn.Sequential(nn.Conv2d(in_channels, channels, 5, stride=2, padding=2), nn.BatchNorm2d(channels), nonlin,
+                                       nn.Conv2d(channels, channels, 5, stride=2, padding=2), nn.BatchNorm2d(channels), nonlin,
+                                       nn.Conv2d(channels, channels, 5, stride=2, padding=2), nn.BatchNorm2d(channels), nonlin)
+
+            self.z_net_lin = nn.Sequential(nn.Linear(channels * side_len * side_len // (2**6), 128), nonlin, nn.Linear(128, z_dim), nn.Tanh())
+
+            self.z_drop = nn.Dropout(p=0.3)
+
+        self.in_l = nn.Sequential(CausalConv(in_channels, channels, kernels, see_center=False), nn.BatchNorm2d(channels), nonlin)
 
         self.layers = []
 
         for i in range(total_convs):
-            l = MultiDilConvBlock(channels, channels, kernels)
-            #l = CausalConv(channels, channels, kernels, see_center=True)
-            self.layers.append(nn.Sequential(l, nn.BatchNorm2d(channels), nn.ELU()))
-            #self.layers.append(nn.Sequential(l, AttentionBlock(channels, K=16, V=channels, side_len=self.side_len), nn.BatchNorm2d(channels), nn.ELU()))
-        self.out_l = nn.Sequential(nn.Conv2d(channels, out_channels, 1), nn.Sigmoid())
+            #l = MultiDilConvBlock(channels, channels, kernels)
+            in_ch = channels
+            if i > self.total_convs // 2:
+                in_ch *= 2
+            elif i == 0:
+                in_ch += self.z_dim
 
-        self.final = nn.Sequential(nn.Conv2d(out_channels // 2, channels, 1), nn.ELU(), nn.Conv2d(channels, in_channels, 1), nn.Sigmoid())
+            if i % 2 == 0:
+                l = CausalConv(in_ch, channels, kernels, see_center=True, sep=True)
+            else:
+                l = AttentionBlock(in_ch, channels, channels, side_len, nonlin)
+            self.layers.append(nn.Sequential(l, nn.BatchNorm2d(channels), nonlin))
+            #self.layers.append(nn.Sequential(l, AttentionBlock(channels, K=16, V=channels, side_len=self.side_len), nn.BatchNorm2d(channels), nn.ELU()))
+        self.out_l = nn.Sequential(nn.Conv2d(channels * 2, out_channels, 1))
 
         self.layers = nn.Sequential(*self.layers)
+
+
+        self.final_pass = nn.Sequential(nn.ConvTranspose2d(in_channels, channels, kernels, stride=2, padding=kernels//2, output_padding=1), nn.BatchNorm2d(channels), nonlin,
+                                        nn.ConvTranspose2d(channels, channels, kernels, stride=1, padding=kernels//2, output_padding=0), nn.BatchNorm2d(channels), nonlin,
+                                        nn.ConvTranspose2d(channels, channels, kernels, stride=1, padding=kernels//2, output_padding=0), nn.BatchNorm2d(channels), nonlin,
+                                        nn.Conv2d(channels, channels, kernels, stride=1, padding=kernels//2), nn.BatchNorm2d(channels), nonlin,
+                                        nn.Conv2d(channels, in_channels, 1), nn.Tanh())
 
         self.cuda()
 
 
-    def forward(self, x, training=False):
-
+    def forward(self, x, return_z=False, set_z=None):
 
         bs = x.shape[0]
 
+        if self.use_z:
+
+            if set_z is None:
+
+                z = self.z_net(x)
+
+                #print(z.shape)
+
+                z = z.view(bs, -1)
+
+                z = self.z_net_lin(z) * 3
+
+            else:
+
+                z = set_z
+
+            z = self.z_drop(z)
+
+            #print(z.shape)
+
+            z0 = z.view(bs, self.z_dim, 1, 1).repeat([1, 1, self.side_len, self.side_len])
 
         x = self.in_l(x)
+
+        if self.use_z:
+
+            x = torch.cat((x, z0), dim=1)
 
         i = 0
 
@@ -586,24 +645,109 @@ class PixelCNN(nn.Module):
                 else:
                     #print(2)
                     j = self.total_convs - i - 1
-                    x = x + past_out[j]
+                    x = torch.cat((x, past_out[j]), dim=1)
 
         x = self.out_l(x)
 
-
-
-        mean = x[:, :self.out_channels // 2]
-        logvar = x[:, self.out_channels // 2:] * 4 - 2
-
-        x = torch.randn(bs, self.out_channels // 2, self.side_len, self.side_len).cuda()
-
-        x = x * torch.exp(logvar * 0.5) + mean
-
-
-        x = self.final(x)
+        if self.use_z and return_z:
+            return x, z
 
         return x
 
+class PixelAttendPers(nn.Module):
+
+    def __init__(self, side_len=64, in_channels=3, channels=64, out_channels=100, total_layers=8, kernels=5, z_dim=16, nonlin=nn.LeakyReLU(), K=64):
+
+        super(PixelAttendPers, self).__init__()
+
+        self.canvas_size = side_len * side_len
+        self.in_channels = in_channels
+        self.side_len = side_len
+        self.total_layers = total_layers
+        self.out_channels = out_channels
+        self.z_dim = z_dim
+        self.K = K
+        self.V = channels
+
+        #print(channels * side_len * side_len // (2**6))
+
+        self.z_net = nn.Sequential(nn.Conv2d(in_channels, channels, 5, stride=2, padding=2), nn.BatchNorm2d(channels), nonlin,
+                                   nn.Conv2d(channels, channels, 5, stride=2, padding=2), nn.BatchNorm2d(channels), nonlin,
+                                   nn.Conv2d(channels, channels, 5, stride=2, padding=2), nn.BatchNorm2d(channels), nonlin)
+
+        self.z_net_lin = nn.Sequential(nn.Linear(channels * side_len * side_len // (2**6), 128), nonlin, nn.Linear(128, z_dim), nn.Tanh())
+
+        self.in_l = nn.Sequential(CausalConv(in_channels, channels, kernels, see_center=False), nn.BatchNorm2d(channels), nonlin)
+
+        self.layers = []
+
+        for i in range(total_layers):
+            in_ch = channels
+            l = AttentionBlockPersistent(in_ch, self.K, self.V, side_len, nonlin)
+            self.layers.append(l)
+            self.layers.append(nn.BatchNorm2d(channels))
+            self.layers.append(nonlin)
+            #self.layers.append(nn.Sequential(l, nn.BatchNorm2d(channels), nonlin))
+            #self.layers.append(nn.Sequential(l, AttentionBlock(channels, K=16, V=channels, side_len=self.side_len), nn.BatchNorm2d(channels), nn.ELU()))
+        self.out_l = nn.Sequential(nn.Conv2d(channels, out_channels, 1))
+
+        self.layers = nn.Sequential(*self.layers)
+
+        self.cuda()
+
+
+    def forward(self, x, return_z=False, set_z=None):
+
+        bs = x.shape[0]
+
+        """
+
+        if set_z is None:
+
+            z = self.z_net(x)
+
+            #print(z.shape)
+
+            z = z.view(bs, -1)
+
+            z = self.z_net_lin(z) * 3
+
+        else:
+
+            z = set_z
+
+        #print(z.shape)
+
+        z0 = z.view(bs, self.z_dim, 1, 1).repeat([1, 1, self.side_len, self.side_len])
+
+        """
+        z = torch.randn([bs, self.z_dim]).cuda()
+
+        x = self.in_l(x)
+
+        #x = torch.cat((x, z0), dim=1)
+
+        i = 0
+
+        
+        K = self.K
+        V = self.V
+
+        k = torch.zeros([bs, K, self.side_len * self.side_len]).cuda()
+        v = torch.zeros([bs, V, self.side_len * self.side_len]).cuda()
+
+        for i, l in enumerate(self.layers):
+            if i % 3 == 0:
+                x, k, v = l(x, k, v)
+            else:
+                x = l(x)
+
+        x = self.out_l(x)
+
+        if return_z:
+            return x, z
+
+        return x
 
 
 class PixelCNNProg(nn.Module):
@@ -949,21 +1093,17 @@ class PixelCNNProg(nn.Module):
                 pix.append(self.final_2(out))
 
         """
-        lv_mean = torch.Tensor([0]).cuda()
-
-        if training:
-            return pix, lv_mean
 
         return pix
 
 
 if __name__ == '__main__':
 
-    side_len = 14
+    side_len = 16
     K = 16
     V = 64
 
-    test = 3
+    test = 4
 
     if test == 1:
 
@@ -998,3 +1138,21 @@ if __name__ == '__main__':
         out, k_new, v_new = a(inp, k, v)
 
         print(out.shape, k_new.shape, v_new.shape)
+
+    else:
+
+        model = PixelCNN(side_len=side_len, kernels=9, in_channels=3, channels=128, out_channels=100, total_convs=12)
+
+        inp = torch.randn((32, 3, side_len, side_len)).cuda()
+
+        out = model(inp)
+
+        print(out.shape)
+
+        out_sample = sample_from_logistic_mix(out)
+
+        print(out_sample.shape)
+
+        out_final = model.final_pass(out_sample)
+
+        print(out_final.shape)

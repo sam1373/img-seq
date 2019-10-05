@@ -22,8 +22,9 @@ batch_size = 128
 sep = 8
 
 #model = ImgAttendModel(side_len=16, kernels=3, channels=128, blocks_rep=4, conv_rep=4)
-#model = PixelCNN(side_len=16, kernels=5, in_channels=3, channels=128, out_channels=200)
-model = PixelCNNProg(side_len=28, kernels=9, in_channels=3, channels=128, out_channels=100, total_attn=9, levels=2)
+model = PixelCNN(side_len=14, kernels=9, in_channels=3, channels=128, out_channels=100, total_convs=12, use_z=False)
+#model = PixelAttendPers(side_len=16, kernels=9, in_channels=3, channels=128, out_channels=100, total_layers=12, z_dim=32)
+#model = PixelCNNProg(side_len=28, kernels=9, in_channels=3, channels=128, out_channels=100, total_attn=9, levels=2)
 model = nn.DataParallel(model)
 
 total = 0
@@ -105,7 +106,6 @@ if sample.shape[1] == 1:
 
 sample = (sample - 0.5) * 2
 
-
 sample_path = "sample"
 
 if not local:
@@ -115,8 +115,8 @@ trainer = Trainer(model, sample_path=sample_path, checkpoints='model.cp')
 
 trainer.model.eval()
 
-trainer.recon_frames(0, sample, level=model.module.levels)
-trainer.sample_frames(0, level=model.module.levels)
+trainer.recon_frames(0, sample)
+trainer.sample_frames(0, mult=0.8)
 
 trainer.train_model(trainloader, test_every_x=5, epochs=1000, epochs_per_level=500)
 
