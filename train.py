@@ -73,7 +73,7 @@ class Trainer(object):
 
                 print(i, "/", data.shape[2])
 
-        final = self.model.module.final_pass(data.view(-1, self.model.module.in_channels, side_len, side_len))
+        final = self.model.forward(data.view(-1, self.model.module.in_channels, side_len, side_len), final=True)
 
         return data, final
 
@@ -127,7 +127,7 @@ class Trainer(object):
 
             recon = recon.view(-1, self.model.module.in_channels, side_len, side_len)
 
-            recon_final = self.model.module.final_pass(recon)
+            recon_final = self.model.forward(recon, final=True)
 
             imgs_with_recon = torch.cat((x0_down, recon), dim=0)
             imgs_with_recon = imgs_with_recon / 2. + 0.5
@@ -242,7 +242,7 @@ class Trainer(object):
 
                    out_sample = sample_from_logistic_mix(out[:bh])
 
-                   out_final = self.model.module.final_pass(out_sample)
+                   out_final = self.model.forward(out_sample, final=True)
 
                    loss_mse = mse_loss(out_final, data[:bh])
 

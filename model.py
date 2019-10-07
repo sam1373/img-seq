@@ -601,7 +601,13 @@ class PixelCNN(nn.Module):
         self.cuda()
 
 
-    def forward(self, x, return_z=False, set_z=None):
+    def forward(self, x, return_z=False, set_z=None, final=False):
+
+        if final:
+
+            return self.final_pass(x)
+
+
 
         bs = x.shape[0]
 
