@@ -17,12 +17,12 @@ import numpy as np
 
 
 
-batch_size = 128
+batch_size = 256
 
 sep = 8
 
 #model = ImgAttendModel(side_len=16, kernels=3, channels=128, blocks_rep=4, conv_rep=4)
-model = PixelCNN(side_len=14, kernels=9, in_channels=3, channels=128, out_channels=100, total_convs=12, use_z=False)
+model = PixelCNN(side_len=16, kernels=9, in_channels=3, channels=128, out_channels=100, total_convs=12, use_z=False)
 #model = PixelAttendPers(side_len=16, kernels=9, in_channels=3, channels=128, out_channels=100, total_layers=12, z_dim=32)
 #model = PixelCNNProg(side_len=28, kernels=9, in_channels=3, channels=128, out_channels=100, total_attn=9, levels=2)
 model = nn.DataParallel(model)
@@ -39,7 +39,7 @@ rescaling = lambda x : (x - .5) * 2.
 
 custom_transform = transforms.Compose([transforms.ToTensor()])
 
-dataset = "MNIST"
+dataset = "CelebA"
 
 local = True
 
@@ -54,7 +54,7 @@ if dataset == "CelebA":
 
   train_dataset = CelebaDataset(txt_path=txt_path,
                                 img_dir=img_dir,
-                                transform=custom_transform, in_size=model.module.side_len)
+                                transform=custom_transform, in_size=model.module.side_len * 4)
 
   trainloader = DataLoader(dataset=train_dataset,
                             batch_size=batch_size,
@@ -116,7 +116,7 @@ trainer = Trainer(model, sample_path=sample_path, checkpoints='model.cp')
 trainer.model.eval()
 
 trainer.recon_frames(0, sample)
-trainer.sample_frames(0, mult=0.8)
+trainer.sample_frames(0, sub=0.5)
 
-trainer.train_model(trainloader, test_every_x=5, epochs=1000, epochs_per_level=500)
+trainer.train_model(trainloader, test_every_x=1, epochs=1000)
 

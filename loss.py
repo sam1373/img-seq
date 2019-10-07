@@ -184,7 +184,7 @@ def to_one_hot(y, n_dims=None):
     y_one_hot = y_one_hot.view(*y.shape, -1)
     return Variable(y_one_hot) if isinstance(y, Variable) else y_one_hot
     
-def sample_from_logistic_mix(l):
+def sample_from_logistic_mix(l, sub_scale=0.):
 
     # Pytorch ordering
     l = l.permute(0, 2, 3, 1)
@@ -208,7 +208,7 @@ def sample_from_logistic_mix(l):
     # select logistic parameters
     means = torch.sum(l[:, :, :, :, :nr_mix] * sel, dim=4) 
     log_scales = torch.clamp(torch.sum(
-        l[:, :, :, :, nr_mix:2 * nr_mix] * sel, dim=4), min=-7.)
+        l[:, :, :, :, nr_mix:2 * nr_mix] * sel, dim=4) - sub_scale, min=-7.)
     coeffs = torch.sum(F.tanh(
         l[:, :, :, :, 2 * nr_mix:3 * nr_mix]) * sel, dim=4)
     # sample from logistic & clip to interval

@@ -593,6 +593,9 @@ class PixelCNN(nn.Module):
                                         nn.ConvTranspose2d(channels, channels, kernels, stride=1, padding=kernels//2, output_padding=0), nn.BatchNorm2d(channels), nonlin,
                                         nn.ConvTranspose2d(channels, channels, kernels, stride=1, padding=kernels//2, output_padding=0), nn.BatchNorm2d(channels), nonlin,
                                         nn.Conv2d(channels, channels, kernels, stride=1, padding=kernels//2), nn.BatchNorm2d(channels), nonlin,
+                                        nn.ConvTranspose2d(channels, channels, kernels, stride=2, padding=kernels//2, output_padding=1), nn.BatchNorm2d(channels), nonlin,
+                                        nn.ConvTranspose2d(channels, channels, kernels, stride=1, padding=kernels//2, output_padding=0), nn.BatchNorm2d(channels), nonlin,
+                                        nn.Conv2d(channels, channels, kernels, stride=1, padding=kernels//2), nn.BatchNorm2d(channels), nonlin,
                                         nn.Conv2d(channels, in_channels, 1), nn.Tanh())
 
         self.cuda()

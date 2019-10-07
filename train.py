@@ -42,10 +42,10 @@ class Trainer(object):
 
         self.load_checkpoint()
 
-        self.avgpool = nn.AvgPool2d(2)
+        self.avgpool = nn.AvgPool2d(4)
 
 
-    def sample(self, bs, same_z=False, set_z=False, mult=1.):
+    def sample(self, bs, same_z=False, set_z=False, sub=0.):
 
         side_len = self.model.module.side_len 
 
@@ -53,19 +53,20 @@ class Trainer(object):
 
         shape2d = (bs, self.model.module.in_channels, side_len, side_len)
 
+
         if set_z:
             z = torch.Tensor([set_z]).view(1, -1).cuda().repeat(bs, 1)
         elif same_z:
-            z = torch.randn([1, self.model.module.z_dim]).cuda().repeat(bs, 1) * mult
+            z = torch.randn([1, self.model.module.z_dim]).cuda().repeat(bs, 1)
         else:
-            z = torch.randn([bs, self.model.module.z_dim]).cuda() * mult
+            z = torch.randn([bs, self.model.module.z_dim]).cuda()
         
 
         for i in range(data.shape[2]):
 
                 out = self.model.forward(data.view(shape2d), set_z=z)
 
-                sample = sample_from_logistic_mix(out)
+                sample = sample_from_logistic_mix(out, sub)
                 cur_out = sample.view(data.shape)[:, :, i]
                         
                 data[:, :, i] = cur_out
@@ -77,18 +78,18 @@ class Trainer(object):
         return data, final
 
 
-    def sample_frames(self, epoch, mult=1.):
+    def sample_frames(self, epoch, sub=0.):
         with torch.no_grad():
 
             side_len = self.model.module.side_len
 
-            gen, gen_final = self.sample(40, same_z=False, mult=mult)
+            gen, gen_final = self.sample(40, same_z=False, sub=sub)
 
             gen = gen.view(-1, self.model.module.in_channels, side_len, side_len)
 
             gen = gen / 2. + 0.5
 
-            gen_final = gen_final.view(-1, self.model.module.in_channels, side_len * 2, side_len * 2)
+            gen_final = gen_final.view(-1, self.model.module.in_channels, side_len * 4, side_len * 4)
 
             gen_final = gen_final / 2. + 0.5
 
@@ -201,7 +202,7 @@ class Trainer(object):
                if data.shape[1] == 1:
                 data = data.repeat(1, 3, 1, 1)
                 bs = data.shape[0]
-                data *= torch.rand([bs, 3, 1, 1]).cuda()
+                #data *= torch.rand([bs, 3, 1, 1]).cuda()
 
                 #data[:, :, 10:20, 10:20] = 1.
 
@@ -229,17 +230,23 @@ class Trainer(object):
                
                loss_mix = discretized_mix_logistic_loss(data_down, out)
 
-               out_sample = sample_from_logistic_mix(out)
-
-               out_final = self.model.module.final_pass(out_sample)
-
-               loss_mse = mse_loss(out_final, data)
-
                #norm = torch.randn(z.shape).cuda()
 
                #loss_z = mmd(z, norm) * 200000
 
-               loss = loss_mix + loss_mse# + loss_z
+               loss = loss_mix# + loss_z
+
+               if i % 5 == 0:
+
+                   bh = out.shape[0] // 8
+
+                   out_sample = sample_from_logistic_mix(out[:bh])
+
+                   out_final = self.model.module.final_pass(out_sample)
+
+                   loss_mse = mse_loss(out_final, data[:bh])
+
+                   loss = loss + loss_mse
 
                loss = loss.mean()
 
